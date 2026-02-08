@@ -10,6 +10,7 @@ import xiangshan.backend.fu.vector.{DstMgu, Mgtu, Mgu, NewMgu, VecPipedFuncUnit}
 import xiangshan.backend.fu.vector.Utils._
 import xiangshan.backend.fu.vector.utils.VecDataSplitModule
 import yunsuan.VialuFixType
+import yunsuan.encoding.Opcode.VIAluOpcodeBundle
 import yunsuan.vector.SewOH
 import yunsuan.vector.VectorALU.VIAluFixPoint
 
@@ -32,7 +33,8 @@ class VIAluFix(cfg: FuConfig)(implicit p: Parameters) extends VecPipedFuncUnit(c
   private val mgu = Module(new NewMgu(dataWidth))
   private val mgtu = Module(new Mgtu(dataWidth))
 
-  private val opcode = VialuFixType.getOpcode(fuOpType).asTypeOf(vIAluFixPoints.head.io.in.opcode)
+  private val opcode = Wire(new VIAluOpcodeBundle)
+  opcode.op := VialuFixType.getOpcode(fuOpType)
   private val isSigned = VialuFixType.isSigned(fuOpType)
   private val isMisc = VialuFixType.isMisc(fuOpType)
   private val widenVs2 = inCtrl.vialuCtrl.get.widenVs2

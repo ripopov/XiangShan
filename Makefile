@@ -17,6 +17,7 @@
 
 BUILD_DIR = ./build
 RTL_DIR = $(BUILD_DIR)/rtl
+NOOP_HOME ?= $(abspath .)
 
 # import docker support
 include scripts/Makefile.docker
@@ -73,6 +74,21 @@ JVM_XSS ?= 256m
 
 # mill arguments for build.sc
 MILL_BUILD_ARGS = -Djvm-xmx=$(JVM_XMX) -Djvm-xss=$(JVM_XSS)
+
+# Java version check and selection
+# Mill 0.12.x currently doesn't support Java 25 due to ASM version
+ifeq ($(JAVA_HOME),)
+  # Try to find a compatible JDK on macOS
+  ifeq ($(shell uname),Darwin)
+    JAVA_HOME_17 := $(shell /usr/libexec/java_home -v 17 2>/dev/null)
+    JAVA_HOME_21 := $(shell /usr/libexec/java_home -v 21 2>/dev/null)
+    ifneq ($(JAVA_HOME_21),)
+      export JAVA_HOME := $(JAVA_HOME_21)
+    else ifneq ($(JAVA_HOME_17),)
+      export JAVA_HOME := $(JAVA_HOME_17)
+    endif
+  endif
+endif
 
 # common chisel args
 MFC_ARGS = --target $(CHISEL_TARGET) \
@@ -226,7 +242,13 @@ TOPMAIN_ARGS += $(RELEASE_ARGS)
 endif
 
 TIMELOG = $(BUILD_DIR)/time.log
-TIME_CMD = time -avp -o $(TIMELOG)
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+TIME_BIN ?= gtime
+else
+TIME_BIN ?= time
+endif
+TIME_CMD = $(TIME_BIN) -avp -o $(TIMELOG)
 
 ifeq ($(PLDM),1)
 SED_IFNDEF = `ifndef SYNTHESIS	// src/main/scala/device/RocketDebugWrapper.scala
@@ -279,16 +301,16 @@ ifeq ($(CHISEL_TARGET),systemverilog)
 	@{ git log -n 1; git diff; } | sed 's/^/\/\// ' > $(dir $@).__diff__
 	@cat $(dir $@).__diff__ $@ > $(dir $@).__out__ && mv $(dir $@).__out__ $@
 ifeq ($(PLDM),1)
-	sed -i -e 's/$$fatal/$$finish/g' $(RTL_DIR)/*.$(RTL_SUFFIX)
-	sed -i -e '/sed/! { \|$(SED_IFNDEF)|, \|$(SED_ENDIF)| { \|$(SED_IFNDEF)|d; \|$(SED_ENDIF)|d; } }' $(RTL_DIR)/*.$(RTL_SUFFIX)
+	sed -i.bak -e 's/$$fatal/$$finish/g' $(RTL_DIR)/*.$(RTL_SUFFIX) && rm -f $(RTL_DIR)/*.$(RTL_SUFFIX).bak
+	sed -i.bak -e '/sed/! { \|$(SED_IFNDEF)|, \|$(SED_ENDIF)| { \|$(SED_IFNDEF)|d; \|$(SED_ENDIF)|d; } }' $(RTL_DIR)/*.$(RTL_SUFFIX) && rm -f $(RTL_DIR)/*.$(RTL_SUFFIX).bak
 else
 ifeq ($(ENABLE_XPROP),1)
-	sed -i -e "s/\$$fatal/assert(1\'b0)/g" $(RTL_DIR)/*.$(RTL_SUFFIX)
+	sed -i.bak -e "s/\$$fatal/assert(1\'b0)/g" $(RTL_DIR)/*.$(RTL_SUFFIX) && rm -f $(RTL_DIR)/*.$(RTL_SUFFIX).bak
 else
-	sed -i -e 's/$$fatal/xs_assert_v2(`__FILE__, `__LINE__)/g' $(RTL_DIR)/*.$(RTL_SUFFIX)
+	sed -i.bak -e 's/$$fatal/xs_assert_v2(`__FILE__, `__LINE__)/g' $(RTL_DIR)/*.$(RTL_SUFFIX) && rm -f $(RTL_DIR)/*.$(RTL_SUFFIX).bak
 endif
 endif
-	sed -i -e "s/\$$error(/\$$fwrite(32\'h80000002, /g" $(RTL_DIR)/*.$(RTL_SUFFIX)
+	sed -i.bak -e "s/\$$error(/\$$fwrite(32\'h80000002, /g" $(RTL_DIR)/*.$(RTL_SUFFIX) && rm -f $(RTL_DIR)/*.$(RTL_SUFFIX).bak
 endif
 
 sim-verilog: $(call docker-deps,$(SIM_TOP_V))
@@ -331,10 +353,10 @@ reformat:
 
 # verilator simulation
 emu-mk: sim-verilog
-	$(MAKE) -C ./difftest emu-mk NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest emu-mk NOOP_HOME=$(NOOP_HOME) DESIGN_DIR=$(NOOP_HOME) NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 emu: $(call docker-deps,emu-mk)
-	$(MAKE) -C ./difftest emu NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+	$(MAKE) -C ./difftest emu NOOP_HOME=$(NOOP_HOME) DESIGN_DIR=$(NOOP_HOME) NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 gsim: sim-verilog
 	$(MAKE) -C ./difftest emu GSIM=1 SIM_TOP=SimTop DESIGN_DIR=$(NOOP_HOME) NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)

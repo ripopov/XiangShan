@@ -289,6 +289,7 @@ Temporary Items
 
 ## Build generated
 build
+build-chi
 DerivedData
 
 ## Various settings
@@ -374,6 +375,7 @@ simulator_out.txt
 *.err
 cr*/
 
+
 # Bug report files
 bug-report/
 bug-report.tar.gz
@@ -381,3 +383,5 @@ bug-report.tar.gz
 # Python virtual environment
 .venv/
 venv/
+
+TEMP

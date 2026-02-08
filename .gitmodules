@@ -28,3 +28,6 @@
 [submodule "ChiselIOPMP"]
 	path = ChiselIOPMP
 	url = https://github.com/OpenXiangShan/ChiselIOPMP.git
+[submodule "XiangShan-Design-Doc"]
+	path = XiangShan-Design-Doc
+	url = https://github.com/OpenXiangShan/XiangShan-Design-Doc/
