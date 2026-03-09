@@ -32,7 +32,7 @@ Together, these mechanisms form a **superscalar, out-of-order execution** engine
 
 ## 10.2 Backend Block Diagram
 
-The following diagram shows the major modules inside the backend and their interconnections. The backend is implemented in [Backend.scala:178](src/main/scala/xiangshan/backend/Backend.scala#L178) (`BackendInlinedImp`), which instantiates four major subsystems:
+The following diagram shows the major modules inside the backend and their interconnections. The backend is implemented in [Backend.scala:178](../../src/main/scala/xiangshan/backend/Backend.scala#L178) (`BackendInlinedImp`), which instantiates four major subsystems:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -94,7 +94,7 @@ The following diagram shows the major modules inside the backend and their inter
 
 **Figure 10.1: Backend top-level block diagram.** The backend contains a CtrlBlock (in-order control pipeline) and three execution Regions (integer, floating-point, vector). Each Region contains its own issue queues, data path, bypass network, execution units, and writeback path. The MemBlock is external to the backend but tightly coupled via issue and writeback interfaces.
 
-The backend instantiation in `BackendInlinedImp` ([Backend.scala:186–191](src/main/scala/xiangshan/backend/Backend.scala#L186)) creates:
+The backend instantiation in `BackendInlinedImp` ([Backend.scala:186–191](../../src/main/scala/xiangshan/backend/Backend.scala#L186)) creates:
 
 ```
 ctrlBlock    — CtrlBlock (decode, rename, dispatch, ROB, redirect generation)
@@ -150,23 +150,22 @@ A key architectural insight in XiangShan's backend is the clean separation betwe
 
 ### 10.4.1 Control Plane: CtrlBlock
 
-The **CtrlBlock** ([CtrlBlock.scala:56](src/main/scala/xiangshan/backend/CtrlBlock.scala#L56)) manages instruction flow and speculative state. It contains:
+The **CtrlBlock** ([CtrlBlock.scala:56](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L56)) manages instruction flow and speculative state. It contains:
 
-- **DecodeStage** — Converts raw instruction bits into micro-ops ([CtrlBlock.scala:99](src/main/scala/xiangshan/backend/CtrlBlock.scala#L99))
-- **FusionDecoder** — Detects pairs of instructions that can be fused into a single micro-op ([CtrlBlock.scala:100](src/main/scala/xiangshan/backend/CtrlBlock.scala#L100))
-- **RenameTableWrapper (RAT)** — Maintains speculative and architectural register mappings ([CtrlBlock.scala:101](src/main/scala/xiangshan/backend/CtrlBlock.scala#L101))
-- **Rename** — Performs register renaming with free list allocation ([CtrlBlock.scala:102](src/main/scala/xiangshan/backend/CtrlBlock.scala#L102))
-- **NewDispatch** — Routes instructions to issue queues and performs structural hazard checks ([CtrlBlock.scala:97](src/main/scala/xiangshan/backend/CtrlBlock.scala#L97))
-- **Rob** — Reorder buffer for in-order commit and exception handling ([CtrlBlock.scala:106](src/main/scala/xiangshan/backend/CtrlBlock.scala#L106))
-- **RedirectGenerator** — Arbitrates among multiple redirect sources (branch misprediction, load replay, ROB flush) ([CtrlBlock.scala:103](src/main/scala/xiangshan/backend/CtrlBlock.scala#L103))
-- **MemCtrl** — Coordinates load/store queue allocation and memory dependency prediction ([CtrlBlock.scala:107](src/main/scala/xiangshan/backend/CtrlBlock.scala#L107))
-- **pcMem** — Synchronous memory storing PCs indexed by FTQ pointer, used for redirect target computation ([CtrlBlock.scala:105](src/main/scala/xiangshan/backend/CtrlBlock.scala#L105))
+- **DecodeStage** — Converts raw instruction bits into micro-ops ([CtrlBlock.scala:99](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L99))
+- **FusionDecoder** — Detects pairs of instructions that can be fused into a single micro-op ([CtrlBlock.scala:100](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L100))
+- **Rename** — Performs register renaming with free list allocation; now also contains the **RenameTableWrapper (RAT)** for speculative and architectural register mappings ([CtrlBlock.scala:101](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L101), [Rename.scala:117](../../src/main/scala/xiangshan/backend/rename/Rename.scala#L117))
+- **NewDispatch** — Routes instructions to issue queues and performs structural hazard checks ([CtrlBlock.scala:97](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L97))
+- **Rob** — Reorder buffer for in-order commit and exception handling ([CtrlBlock.scala:105](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L105))
+- **RedirectGenerator** — Arbitrates among multiple redirect sources (branch misprediction, load replay, ROB flush) ([CtrlBlock.scala:102](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L102))
+- **MemCtrl** — Coordinates load/store queue allocation and memory dependency prediction ([CtrlBlock.scala:106](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L106))
+- **pcMem** — Synchronous memory storing PCs indexed by FTQ pointer, used for redirect target computation ([CtrlBlock.scala:104](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L104))
 
 The CtrlBlock processes instructions *in order* through the decode → rename → dispatch pipeline. It receives writeback status from all execution units and manages the ROB commit logic. When a misprediction or exception is detected, the CtrlBlock generates a redirect that flushes speculative state throughout the backend and frontend.
 
 ### 10.4.2 Data Plane: Regions
 
-The **data plane** is organized as three independent **Regions**, each implemented by the `Region` module ([Region.scala:37](src/main/scala/xiangshan/backend/Region.scala#L37)). A Region encapsulates everything needed to hold, read, execute, and write back instructions for one domain of execution:
+The **data plane** is organized as three independent **Regions**, each implemented by the `Region` module ([Region.scala:37](../../src/main/scala/xiangshan/backend/Region.scala#L37)). A Region encapsulates everything needed to hold, read, execute, and write back instructions for one domain of execution:
 
 | Region | Scheduler Type | Functional Units | Register File |
 |--------|---------------|------------------|---------------|
@@ -192,9 +191,9 @@ This section traces the complete path of instructions through the backend, ident
 
 ### 10.5.1 Frontend → Decode
 
-The IBuffer delivers up to 8 instructions per cycle to the backend via the `FrontendToCtrlIO` interface ([Backend.scala:711](src/main/scala/xiangshan/backend/Backend.scala#L711)). Each instruction arrives as a `CtrlFlow` bundle carrying the 32-bit instruction encoding, virtual PC, FTQ pointer, and any frontend-detected exceptions (e.g., instruction page fault, access fault).
+The IBuffer delivers up to 8 instructions per cycle to the backend via the `FrontendToCtrlIO` interface ([Backend.scala:715](../../src/main/scala/xiangshan/backend/Backend.scala#L715)). Each instruction arrives as a `CtrlFlow` bundle carrying the 32-bit instruction encoding, virtual PC, FTQ pointer, and any frontend-detected exceptions (e.g., instruction page fault, access fault).
 
-The CtrlBlock connects this interface directly: `ctrlBlock.io.frontend <> io.frontend` ([Backend.scala:202](src/main/scala/xiangshan/backend/Backend.scala#L202)).
+The CtrlBlock connects this interface directly: `ctrlBlock.io.frontend <> io.frontend` ([Backend.scala:202](../../src/main/scala/xiangshan/backend/Backend.scala#L202)).
 
 ### 10.5.2 Decode → Rename
 
@@ -243,7 +242,7 @@ Within each Region, the instruction passes through a pipeline of internal stages
 
 ### 10.5.6 Writeback → ROB Commit
 
-Writeback results flow from all three Regions back to the CtrlBlock. The aggregation happens in `BackendInlinedImp` ([Backend.scala:207–215](src/main/scala/xiangshan/backend/Backend.scala#L207)):
+Writeback results flow from all three Regions back to the CtrlBlock. The aggregation happens in `BackendInlinedImp` ([Backend.scala:207–215](../../src/main/scala/xiangshan/backend/Backend.scala#L207)):
 
 ```
 wbDataPathToCtrlBlock = intRegion.writeback ++ fpRegion.writeback ++ vecRegion.writeback
@@ -260,7 +259,7 @@ Although the three Regions are largely independent, they must communicate in two
 
 ### 10.6.1 Cross-Domain Wake-up
 
-When a load instruction completes in the integer Region and its result will be consumed by a floating-point operation (e.g., `FLW` loads data used by `FADD`), the FP Region's issue queues need a wake-up signal. XiangShan implements this through dedicated cross-region wake-up paths ([Backend.scala:306–312](src/main/scala/xiangshan/backend/Backend.scala#L306)):
+When a load instruction completes in the integer Region and its result will be consumed by a floating-point operation (e.g., `FLW` loads data used by `FADD`), the FP Region's issue queues need a wake-up signal. XiangShan implements this through dedicated cross-region wake-up paths ([Backend.scala:306–312](../../src/main/scala/xiangshan/backend/Backend.scala#L306)):
 
 - `intRegion → fpRegion`: Integer-to-FP wake-up (load results used by FP ops)
 - `fpRegion → intRegion`: FP-to-integer wake-up (FP conversion results used by integer ops)
@@ -275,7 +274,7 @@ fpRegion.io.fromIntIQ  ←  intRegion.io.intIQOut     (int-issued ops needing FP
 intRegion.io.fpRfRdata ←  fpRegion.io.fpRfRdataOut  (FP data returned to int region)
 ```
 
-These ports are configured in [Backend.scala:385–393](src/main/scala/xiangshan/backend/Backend.scala#L385).
+These ports are configured in [Backend.scala:385–393](../../src/main/scala/xiangshan/backend/Backend.scala#L385).
 
 ---
 
@@ -293,11 +292,11 @@ Three sources can generate a redirect, listed in priority order:
 | **Execution redirect** | Branch/jump unit misprediction | BEQ predicted taken but resolved not-taken |
 | **Load replay** | Memory ordering violation | Load observed stale data due to store-to-load ordering |
 
-The **RedirectGenerator** ([CtrlBlock.scala:103](src/main/scala/xiangshan/backend/CtrlBlock.scala#L103)) arbitrates among these sources, always selecting the redirect from the *oldest* instruction (earliest in program order) to ensure correct recovery.
+The **RedirectGenerator** ([CtrlBlock.scala:102](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L102)) arbitrates among these sources, always selecting the redirect from the *oldest* instruction (earliest in program order) to ensure correct recovery.
 
 ### 10.7.2 Redirect Pipeline
 
-The redirect propagates through a multi-stage pipeline for timing closure ([CtrlBlock.scala:111–134](src/main/scala/xiangshan/backend/CtrlBlock.scala#L111)):
+The redirect propagates through a multi-stage pipeline for timing closure ([CtrlBlock.scala:110–133](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L110)):
 
 ```
 Cycle S0: ROB detects flush condition (s0_robFlushRedirect)
@@ -306,7 +305,7 @@ Cycle S2: s2_s4_redirect = RegNext(s1_s3_redirect)  — sent to Regions
 Cycle S3: s3_s5_redirect = RegNext(s2_s4_redirect)  — sent to FTQ/frontend
 ```
 
-The key mux at cycle S1 ([CtrlBlock.scala:124](src/main/scala/xiangshan/backend/CtrlBlock.scala#L124)):
+The key mux at cycle S1 ([CtrlBlock.scala:123](../../src/main/scala/xiangshan/backend/CtrlBlock.scala#L123)):
 ```
 s1_s3_redirect = Mux(s1_robFlushRedirect.valid, s1_robFlushRedirect, s3_redirectGen)
 ```
@@ -327,7 +326,7 @@ When a redirect fires, the following recovery actions occur:
 
 ## 10.8 Memory Subsystem Interface
 
-The backend communicates with the memory subsystem (MemBlock, covered in Part IV) through the `BackendMemIO` interface ([Backend.scala:616](src/main/scala/xiangshan/backend/Backend.scala#L616)). This interface is extensive because load/store instructions are *issued* from the integer Region's issue queues but *executed* in the MemBlock.
+The backend communicates with the memory subsystem (MemBlock, covered in Part IV) through the `BackendMemIO` interface ([Backend.scala:620](../../src/main/scala/xiangshan/backend/Backend.scala#L620)). This interface is extensive because load/store instructions are *issued* from the integer Region's issue queues but *executed* in the MemBlock.
 
 ### 10.8.1 Issue Path (Backend → MemBlock)
 
@@ -358,7 +357,7 @@ The backend communicates with the memory subsystem (MemBlock, covered in Part IV
 
 ## 10.9 Backend I/O Interface Table
 
-The following table lists the major I/O ports of the `BackendIO` bundle ([Backend.scala:703–733](src/main/scala/xiangshan/backend/Backend.scala#L703)), which defines the backend's boundary with the rest of the SoC:
+The following table lists the major I/O ports of the `BackendIO` bundle ([Backend.scala:707–737](../../src/main/scala/xiangshan/backend/Backend.scala#L707)), which defines the backend's boundary with the rest of the SoC:
 
 | Port Name | Direction | Width / Type | Description |
 |-----------|-----------|-------------|-------------|
@@ -386,36 +385,36 @@ The following table lists the major I/O ports of the `BackendIO` bundle ([Backen
 
 ## 10.10 Key Backend Parameters
 
-The backend is highly parameterized through `XSCoreParameters` ([Parameters.scala:48](src/main/scala/xiangshan/Parameters.scala#L48)) and `BackendParams` ([BackendParams.scala:36](src/main/scala/xiangshan/backend/BackendParams.scala#L36)). The following table lists the most important parameters with their default values in the Kunminghu configuration:
+The backend is highly parameterized through `XSCoreParameters` ([Parameters.scala:48](../../src/main/scala/xiangshan/Parameters.scala#L48)) and `BackendParams` ([BackendParams.scala:36](../../src/main/scala/xiangshan/backend/BackendParams.scala#L36)). The following table lists the most important parameters with their default values in the Kunminghu configuration:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| [`DecodeWidth`](src/main/scala/xiangshan/Parameters.scala#L80) | 8 | Instructions decoded per cycle |
-| [`RenameWidth`](src/main/scala/xiangshan/Parameters.scala#L81) | 8 | Instructions renamed per cycle |
-| [`CommitWidth`](src/main/scala/xiangshan/Parameters.scala#L82) | 8 | Instructions committed per cycle |
-| [`RobSize`](src/main/scala/xiangshan/Parameters.scala#L110) | 352 | Reorder buffer entries |
-| [`RabSize`](src/main/scala/xiangshan/Parameters.scala#L111) | 352 | Register alias buffer entries |
-| [`RenameSnapshotNum`](src/main/scala/xiangshan/Parameters.scala#L87) | 4 | Rename state snapshots for fast recovery |
-| [`IssueQueueSize`](src/main/scala/xiangshan/Parameters.scala#L113) | 20 | Default issue queue depth |
-| [`IssueQueueCompEntrySize`](src/main/scala/xiangshan/Parameters.scala#L114) | 12 | Compressed (simple) entries in each IQ |
-| [`intPreg.numEntries`](src/main/scala/xiangshan/Parameters.scala#L117) | 224 | Physical integer registers |
-| [`fpPreg.numEntries`](src/main/scala/xiangshan/Parameters.scala#L123) | 256 | Physical FP registers |
-| [`vfPreg.numEntries`](src/main/scala/xiangshan/Parameters.scala#L129) | 128 | Physical vector registers (128-bit) |
-| [`v0Preg.numEntries`](src/main/scala/xiangshan/Parameters.scala#L135) | 22 | Physical mask (v0) registers |
-| [`vlPreg.numEntries`](src/main/scala/xiangshan/Parameters.scala#L141) | 32 | Physical vector-length registers |
-| [`IntRegCacheSize`](src/main/scala/xiangshan/Parameters.scala#L146) | 16 | Integer register cache entries |
-| [`MemRegCacheSize`](src/main/scala/xiangshan/Parameters.scala#L147) | 12 | Memory register cache entries |
-| [`VirtualLoadQueueSize`](src/main/scala/xiangshan/Parameters.scala#L99) | 72 | Load queue capacity |
-| [`StoreQueueSize`](src/main/scala/xiangshan/Parameters.scala#L106) | 56 | Store queue capacity |
-| [`LoadPipelineWidth`](src/main/scala/xiangshan/Parameters.scala#L152) | 3 | Parallel load pipelines |
-| [`StorePipelineWidth`](src/main/scala/xiangshan/Parameters.scala#L153) | 2 | Parallel store pipelines |
-| [`VLEN`](src/main/scala/xiangshan/Parameters.scala#L53) | 128 | Vector register width (bits) |
+| [`DecodeWidth`](../../src/main/scala/xiangshan/Parameters.scala#L80) | 8 | Instructions decoded per cycle |
+| [`RenameWidth`](../../src/main/scala/xiangshan/Parameters.scala#L81) | 8 | Instructions renamed per cycle |
+| [`CommitWidth`](../../src/main/scala/xiangshan/Parameters.scala#L82) | 8 | Instructions committed per cycle |
+| [`RobSize`](../../src/main/scala/xiangshan/Parameters.scala#L110) | 352 | Reorder buffer entries |
+| [`RabSize`](../../src/main/scala/xiangshan/Parameters.scala#L111) | 352 | Register alias buffer entries |
+| [`RenameSnapshotNum`](../../src/main/scala/xiangshan/Parameters.scala#L87) | 4 | Rename state snapshots for fast recovery |
+| [`IssueQueueSize`](../../src/main/scala/xiangshan/Parameters.scala#L113) | 20 | Default issue queue depth |
+| [`IssueQueueCompEntrySize`](../../src/main/scala/xiangshan/Parameters.scala#L114) | 12 | Compressed (simple) entries in each IQ |
+| [`intPreg.numEntries`](../../src/main/scala/xiangshan/Parameters.scala#L117) | 224 | Physical integer registers |
+| [`fpPreg.numEntries`](../../src/main/scala/xiangshan/Parameters.scala#L123) | 256 | Physical FP registers |
+| [`vfPreg.numEntries`](../../src/main/scala/xiangshan/Parameters.scala#L129) | 128 | Physical vector registers (128-bit) |
+| [`v0Preg.numEntries`](../../src/main/scala/xiangshan/Parameters.scala#L135) | 22 | Physical mask (v0) registers |
+| [`vlPreg.numEntries`](../../src/main/scala/xiangshan/Parameters.scala#L141) | 32 | Physical vector-length registers |
+| [`IntRegCacheSize`](../../src/main/scala/xiangshan/Parameters.scala#L146) | 16 | Integer register cache entries |
+| [`MemRegCacheSize`](../../src/main/scala/xiangshan/Parameters.scala#L147) | 12 | Memory register cache entries |
+| [`VirtualLoadQueueSize`](../../src/main/scala/xiangshan/Parameters.scala#L99) | 72 | Load queue capacity |
+| [`StoreQueueSize`](../../src/main/scala/xiangshan/Parameters.scala#L106) | 56 | Store queue capacity |
+| [`LoadPipelineWidth`](../../src/main/scala/xiangshan/Parameters.scala#L152) | 3 | Parallel load pipelines |
+| [`StorePipelineWidth`](../../src/main/scala/xiangshan/Parameters.scala#L153) | 2 | Parallel store pipelines |
+| [`VLEN`](../../src/main/scala/xiangshan/Parameters.scala#L53) | 128 | Vector register width (bits) |
 
 ---
 
 ## 10.11 Execution Unit Organization
 
-The default Kunminghu backend configuration ([BackendParams.scala:534–693](src/main/scala/xiangshan/backend/BackendParams.scala#L534)) organizes execution units into three scheduler domains. Each scheduler domain maps to one Region.
+The default Kunminghu backend configuration ([BackendParams.scala:534–693](../../src/main/scala/xiangshan/backend/BackendParams.scala#L534)) organizes execution units into three scheduler domains. Each scheduler domain maps to one Region.
 
 ### 10.11.1 Integer Scheduler
 
@@ -478,7 +477,7 @@ XiangShan supports two types of wake-up:
 
 ### 10.12.2 Bypass Network
 
-The **BypassNetwork** ([BypassNetwork.scala:20](src/main/scala/xiangshan/backend/datapath/BypassNetwork.scala#L20)) provides three levels of data forwarding within each Region:
+The **BypassNetwork** ([BypassNetwork.scala:78](../../src/main/scala/xiangshan/backend/datapath/BypassNetwork.scala#L78)) provides three levels of data forwarding within each Region:
 
 | Bypass Level | Timing | Data Source | Use Case |
 |-------------|--------|------------|----------|
@@ -593,18 +592,18 @@ The following table maps the major concepts discussed in this chapter to their p
 
 | Concept | Primary File | Key Class |
 |---------|-------------|-----------|
-| Backend top-level | [Backend.scala](src/main/scala/xiangshan/backend/Backend.scala) | `BackendInlinedImp` |
-| Backend parameters | [BackendParams.scala](src/main/scala/xiangshan/backend/BackendParams.scala) | `BackendParams` |
-| Core parameters | [Parameters.scala](src/main/scala/xiangshan/Parameters.scala) | `XSCoreParameters` |
-| Control block | [CtrlBlock.scala](src/main/scala/xiangshan/backend/CtrlBlock.scala) | `CtrlBlockImp` |
-| Execution region | [Region.scala](src/main/scala/xiangshan/backend/Region.scala) | `Region` |
-| Data path | [DataPath.scala](src/main/scala/xiangshan/backend/datapath/DataPath.scala) | `DataPath` |
-| Bypass network | [BypassNetwork.scala](src/main/scala/xiangshan/backend/datapath/BypassNetwork.scala) | `BypassNetwork` |
-| Execution units | [ExuBlock.scala](src/main/scala/xiangshan/backend/exu/ExuBlock.scala) | `ExuBlock` |
-| Writeback arbitration | [WbArbiter.scala](src/main/scala/xiangshan/backend/datapath/WbArbiter.scala) | `WbDataPath` |
-| Issue queue | [IssueQueue.scala](src/main/scala/xiangshan/backend/issue/IssueQueue.scala) | `IssueQueueImp` |
-| FU configuration | [FuConfig.scala](src/main/scala/xiangshan/backend/fu/FuConfig.scala) | `FuConfig` |
-| XSCore integration | [XSCore.scala](src/main/scala/xiangshan/XSCore.scala) | `XSCoreImp` |
+| Backend top-level | [Backend.scala](../../src/main/scala/xiangshan/backend/Backend.scala) | `BackendInlinedImp` |
+| Backend parameters | [BackendParams.scala](../../src/main/scala/xiangshan/backend/BackendParams.scala) | `BackendParams` |
+| Core parameters | [Parameters.scala](../../src/main/scala/xiangshan/Parameters.scala) | `XSCoreParameters` |
+| Control block | [CtrlBlock.scala](../../src/main/scala/xiangshan/backend/CtrlBlock.scala) | `CtrlBlockImp` |
+| Execution region | [Region.scala](../../src/main/scala/xiangshan/backend/Region.scala) | `Region` |
+| Data path | [DataPath.scala](../../src/main/scala/xiangshan/backend/datapath/DataPath.scala) | `DataPath` |
+| Bypass network | [BypassNetwork.scala](../../src/main/scala/xiangshan/backend/datapath/BypassNetwork.scala) | `BypassNetwork` |
+| Execution units | [ExuBlock.scala](../../src/main/scala/xiangshan/backend/exu/ExuBlock.scala) | `ExuBlock` |
+| Writeback arbitration | [WbArbiter.scala](../../src/main/scala/xiangshan/backend/datapath/WbArbiter.scala) | `WbDataPath` |
+| Issue queue | [IssueQueue.scala](../../src/main/scala/xiangshan/backend/issue/IssueQueue.scala) | `IssueQueueImp` |
+| FU configuration | [FuConfig.scala](../../src/main/scala/xiangshan/backend/fu/FuConfig.scala) | `FuConfig` |
+| XSCore integration | [XSCore.scala](../../src/main/scala/xiangshan/XSCore.scala) | `XSCoreImp` |
 
 ---
 
