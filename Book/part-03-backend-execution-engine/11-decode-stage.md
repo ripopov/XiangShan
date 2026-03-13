@@ -97,8 +97,8 @@ With that mental model in place, the decode stage has to solve five concrete pro
 1. It must sustain the backend's front-end width. The core parameters define `DecodeWidth` and `RenameWidth`, which are
    `8` by default in [Parameters.scala:80](src/main/scala/xiangshan/Parameters.scala#L80) and
    [Parameters.scala:81](src/main/scala/xiangshan/Parameters.scala#L81), but `6` in
-   [Configs.scala:511](src/main/scala/top/Configs.scala#L511) and
-   [Configs.scala:512](src/main/scala/top/Configs.scala#L512) for `TLBackendV2Config`.
+   [Configs.scala:510](src/main/scala/top/Configs.scala#L510) and
+   [Configs.scala:511](src/main/scala/top/Configs.scala#L511) for `TLBackendV2Config`.
 
 2. It must translate one architectural instruction into the internal control structure used by rename and dispatch.
    The output bundle `DecodeOutUop` contains logical source and destination registers, source kinds, functional-unit
@@ -115,7 +115,7 @@ With that mental model in place, the decode stage has to solve five concrete pro
    cannot be purely local. `VTypeGen` maintains speculative and committed vector configuration state and cooperates with
    the ROB's `VTypeBuffer` during redirect recovery
    ([VTypeGen.scala:30](src/main/scala/xiangshan/backend/decode/VTypeGen.scala#L30),
-   [VTypeBuffer.scala:373](src/main/scala/xiangshan/backend/rob/VTypeBuffer.scala#L373)).
+   [VTypeBuffer.scala:375](src/main/scala/xiangshan/backend/rob/VTypeBuffer.scala#L375)).
 
 5. It must preserve in-order presentation to rename even when a single instruction expands into many uops. Vector
    instructions, including configuration operations, plus `AMOCAS` are treated as complex instructions by `UopInfoGen`
@@ -202,7 +202,7 @@ The timing buffer is implemented directly in `CtrlBlock` as `decodeBufBits` and 
 [CtrlBlock.scala:442](src/main/scala/xiangshan/backend/CtrlBlock.scala#L442)). When decode cannot consume all visible
 frontend instructions, the unaccepted suffix is held there and retried first on the next cycle
 ([CtrlBlock.scala:486](src/main/scala/xiangshan/backend/CtrlBlock.scala#L486) to
-[CtrlBlock.scala:526](src/main/scala/xiangshan/backend/CtrlBlock.scala#L526)).
+[CtrlBlock.scala:525](src/main/scala/xiangshan/backend/CtrlBlock.scala#L525)).
 
 That buffer is worth emphasizing because it is easy to miss in a block-level overview. The IBuffer has already
 smoothed fetch burstiness across the frontend/backend boundary. `decodeBuf` solves a *different* problem: it absorbs
@@ -242,7 +242,7 @@ The following terms appear repeatedly in decode RTL and are worth fixing before 
 | ---- | ----------------------- |
 | Architectural instruction | One ISA-visible RISC-V instruction, such as `add`, `ld`, or `vsetvli`. This is what software thinks it issued. |
 | Uop | The backend's internal unit of work. Many instructions stay 1:1, but vector and `AMOCAS` instructions may expand into several uops before rename. |
-| Logical source / destination | Architectural register names such as `x1`, `f3`, or `v8`. Decode produces these as `lsrc` and `ldest` in [`DecodeOutUop`](src/main/scala/xiangshan/backend/Bundles.scala#L136). |
+| Logical source / destination | Indices in XiangShan's logical register namespaces. Many are ordinary architectural names such as `x1`, `f3`, or `v8`, but decode can also use internal names such as vector temporaries plus the dedicated `v0` and `vl` spaces. |
 | Physical source / destination | Backend register tags allocated later by rename. Decode does **not** allocate them yet; it only prepares the logical information rename will consume. |
 | `fuType` | A coarse execution-class tag such as ALU, load/store, floating-point, vector, or CSR-like internal path. It guides dispatch and issue placement. |
 | `fuOpType` | A finer operation subtype inside a functional-unit class, such as add vs. shift vs. compare. |
@@ -251,10 +251,11 @@ The following terms appear repeatedly in decode RTL and are worth fixing before 
 
 Two distinctions are especially important.
 
-First, **logical** registers are still ISA names. Decode says "this instruction reads `x1`." Rename later turns that
-into "read physical register `p47`." Second, **uop count** is not always the same as **instruction count**. Once that
-point is clear, the behavior of `DecodeUnitComp`, `decodeBuf`, and the timing diagrams becomes much easier to reason
-about.
+First, **logical** registers are not yet physical tags. For ordinary scalar instructions, decode says "this
+instruction reads `x1`," and rename later turns that into "read physical register `p47`." For some vector and `vset`
+cases, decode can also use internal logical names such as temporaries or the dedicated `vl` space. Second, **uop
+count** is not always the same as **instruction count**. Once that point is clear, the behavior of `DecodeUnitComp`,
+`decodeBuf`, and the timing diagrams becomes much easier to reason about.
 
 ### 11.3.3 What decode decides, and what it leaves for later
 
@@ -291,10 +292,10 @@ independently.
 | ---------- | --------- | ------- |
 | [`redirect`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L43) | Input | Kills decode on wrong-path instructions and suppresses speculative `vtype` updates. |
 | [`in`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L46), [`out`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L48) | Input / Output | Main decode window: `Vec[DecoupledIO[DecodeInUop]]` to `Vec[DecoupledIO[DecodeOutUop]]`. |
-| [`intRat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L50), [`fpRat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L51), [`vecRat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L52), [`v0Rat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L54), [`vlRat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L55) | Output to RAT read ports | Decode drives logical source indices early so rename can receive physical mappings without adding another stage. |
+| [`intRat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L50), [`fpRat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L51), [`vecRat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L52), [`v0Rat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L54), [`vlRat`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L55) | Output to RAT read ports | Decode drives integer, floating-point, and vector logical source indices early; the dedicated `v0` and `vl` ports use fixed one-entry namespaces. |
 | [`csrCtrl`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L57), [`fromCSR`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L58) | Input | Custom decode policy and privilege-dependent legality information from CSR logic. |
 | [`fromRob`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L62), [`vsetvlVType`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L75), [`vstart`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L76) | Input | Recovery and vector-state feedback: commit-time `vtype`, walk-time `vtype`, resolved `vsetvl` `vtype`, and current `vstart`. |
-| [`toCSR.trapInstInfo`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L78) | Output | Reports the first accepted illegal instruction to CSR/trap control for precise bookkeeping. |
+| [`toCSR.trapInstInfo`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L78) | Output | Reports the first accepted illegal or virtual instruction to CSR/trap control for precise bookkeeping. |
 | [`stallReason`](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L71) | Input / Output | Top-down performance attribution for bubbles and backpressure. |
 
 ## 11.4 Internal Pipeline and Data Path Walkthrough
@@ -319,7 +320,7 @@ flowchart TB
   E["5. UopInfoGen marks complex instructions"]
   F["6. First complex instruction -> DecodeUnitComp + VecExceptionGen"]
   G["7. Merge complex uops with leading simple instructions"]
-  H["8. Fixups: reverse ops, v0/vl writes, uop metadata"]
+  H["8. Fixups: reverse ops, v0 handling, uop metadata"]
   I["9. RAT read addresses + trapInstInfo"]
   J["10. FusionDecoder patches pair idioms, then rename"]
 
@@ -360,7 +361,7 @@ Two consequences follow.
 
 2. Backpressure toward the frontend is generated from the state of `decodeBuf`, not directly from the combinational
    readiness of the simple decoders
-   ([CtrlBlock.scala:526](src/main/scala/xiangshan/backend/CtrlBlock.scala#L526)).
+   ([CtrlBlock.scala:525](src/main/scala/xiangshan/backend/CtrlBlock.scala#L525)).
 
 This is a clean interface division. The frontend sees only whether the backend-side entrance can accept more work. It
 does not need to know whether the temporary blockage came from rename backpressure, a complex vector expansion, or a
@@ -498,8 +499,8 @@ decode can derive it from immediates. `vsetvl` reads a register operand, so deco
 result and accept resolved feedback from the backend
 ([VTypeGen.scala:36](src/main/scala/xiangshan/backend/decode/VTypeGen.scala#L36) to
 [VTypeGen.scala:43](src/main/scala/xiangshan/backend/decode/VTypeGen.scala#L43),
-[Backend.scala:424](src/main/scala/xiangshan/backend/Backend.scala#L424),
-[CtrlBlock.scala:830](src/main/scala/xiangshan/backend/CtrlBlock.scala#L830)).
+[Backend.scala:428](src/main/scala/xiangshan/backend/Backend.scala#L428),
+[CtrlBlock.scala:805](src/main/scala/xiangshan/backend/CtrlBlock.scala#L805)).
 
 The broader lesson is that vector support makes decode stateful. Scalar integer decode mostly extracts intent from the
 instruction itself. Vector decode often needs both the instruction and the current speculative vector environment.
@@ -544,7 +545,8 @@ Examples from the RTL include:
 - `AMOCAS.W` and `AMOCAS.D` splitting into two uops, and `AMOCAS.Q` into four
   ([DecodeUnitComp.scala:210](src/main/scala/xiangshan/backend/decode/DecodeUnitComp.scala#L210) to
   [DecodeUnitComp.scala:277](src/main/scala/xiangshan/backend/decode/DecodeUnitComp.scala#L277)).
-- `vset*` splitting into two coordinated uops, one for the scalar destination and one for `vl`/`vtype`
+- `vset*` splitting into two coordinated uops. In the common case, one writes the scalar result and the other writes
+  `vl`/`vtype`; special `vsetvl x0, x0, rs2` cases first move the encoded `vtype` source into a vector temporary
   ([DecodeUnitComp.scala:278](src/main/scala/xiangshan/backend/decode/DecodeUnitComp.scala#L278) to
   [DecodeUnitComp.scala:352](src/main/scala/xiangshan/backend/decode/DecodeUnitComp.scala#L352)).
 - Vector arithmetic and vector load/store families mapping LMUL-sized register groups into repeated uops with distinct
@@ -602,17 +604,18 @@ expects.
 ### 11.4.7 RAT read setup and trap-side reporting
 
 Decode does not only *produce* uops. It also prepares rename by driving the logical register addresses for the rename
-alias tables. Integer, floating-point, vector, `v0`, and `vl` RAT ports are all assigned directly from the decoded
-logical sources
+alias tables. Integer, floating-point, and vector RAT ports read decoded `lsrc` fields directly, while the dedicated
+`v0` and `vl` RAT ports are hard-wired to `V0_IDX` and `Vl_IDX`
 ([DecodeStage.scala:264](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L264) to
 [DecodeStage.scala:292](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L292)).
 
 The comment at [DecodeStage.scala:269](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L269) is important:
 the RAT reads use the logical sources *before fusion* for better timing. Fusion can still alter the first uop later,
 but rename repairs the affected physical source through a sideband `FusionDecodeInfo`
-([FusionDecoder.scala:507](src/main/scala/xiangshan/backend/decode/FusionDecoder.scala#L507),
-[Rename.scala:440](src/main/scala/xiangshan/backend/rename/Rename.scala#L440) to
-[Rename.scala:445](src/main/scala/xiangshan/backend/rename/Rename.scala#L445)).
+([FusionDecoder.scala:516](src/main/scala/xiangshan/backend/decode/FusionDecoder.scala#L516),
+[FusionDecoder.scala:664](src/main/scala/xiangshan/backend/decode/FusionDecoder.scala#L664),
+[Rename.scala:531](src/main/scala/xiangshan/backend/rename/Rename.scala#L531) to
+[Rename.scala:534](src/main/scala/xiangshan/backend/rename/Rename.scala#L534)).
 
 This is a good example of a timing-aware division of labor. Decode starts RAT-related work as early as possible using
 the pre-fusion operand view. If fusion later changes one source, the narrower repair path in rename absorbs that cost
@@ -693,14 +696,15 @@ that boundary yet.
 stateDiagram-v2
   [*] --> Idle
   Idle --> Active: io.in.fire
-  Active --> Active: remaining uops > RenameWidth
+  Active --> Active: remaining uops exceed accepted width or downstream stalls
   Active --> Active: last chunk sent and next complex inst already valid
   Active --> Idle: last chunk sent and no next complex inst
   Active --> Idle: redirect
 ```
 
 **Figure 11.4: `DecodeUnitComp` control FSM.** In `Active`, the expander keeps a residual counter (`uopRes`) and emits
-up to `RenameWidth` uops per cycle until the current complex instruction is fully drained.
+up to `RenameWidth` uops per cycle when the downstream path is ready, until the current complex instruction is fully
+drained.
 
 The FSM is intentionally small. Most of the complexity is expressed in the stored templates, residual counters, and
 merge rules rather than in a large controller with many symbolic states. That is a common and useful hardware pattern:
@@ -710,7 +714,7 @@ keep control sequencing simple when structured metadata can carry most of the va
 
 Fusion is a separate module, but architecturally it still belongs to the decode stage because it transforms adjacent
 decoded instructions *before* rename sees them. `CtrlBlock` disables fusion in single-step mode or when CSR state clears
-`fusion_enable` ([CtrlBlock.scala:109](src/main/scala/xiangshan/backend/CtrlBlock.scala#L109)).
+`fusion_enable` ([CtrlBlock.scala:108](src/main/scala/xiangshan/backend/CtrlBlock.scala#L108)).
 
 The `FusionDecoder` works in two steps
 ([FusionDecoder.scala:539](src/main/scala/xiangshan/backend/decode/FusionDecoder.scala#L539) to
@@ -736,8 +740,8 @@ Supported patterns include:
 
 When fusion changes the first uop's second source, rename repairs `psrc(1)` by selecting the physical source that was
 already read for the second instruction, or by substituting zero
-([Rename.scala:442](src/main/scala/xiangshan/backend/rename/Rename.scala#L442) to
-[Rename.scala:445](src/main/scala/xiangshan/backend/rename/Rename.scala#L445)).
+([Rename.scala:531](src/main/scala/xiangshan/backend/rename/Rename.scala#L531) to
+[Rename.scala:534](src/main/scala/xiangshan/backend/rename/Rename.scala#L534)).
 This is why decode can keep RAT timing short without giving up fusion.
 
 This placement is a compromise between three competing goals. Fusion wants visibility into adjacent instruction
@@ -750,10 +754,10 @@ The decode stage is heavily parameterized. The most important knobs are listed b
 
 | Parameter | Effect on decode |
 | --------- | ---------------- |
-| [`DecodeWidth`](src/main/scala/xiangshan/Parameters.scala#L80), [`RenameWidth`](src/main/scala/xiangshan/Parameters.scala#L81) | Number of instruction lanes visible to decode and number of uops that can be handed to rename per cycle. Default configs use `8/8`; `TLBackendV2Config` reduces both to `6/6` in [Configs.scala:511](src/main/scala/top/Configs.scala#L511) and [Configs.scala:512](src/main/scala/top/Configs.scala#L512). |
+| [`DecodeWidth`](src/main/scala/xiangshan/Parameters.scala#L80), [`RenameWidth`](src/main/scala/xiangshan/Parameters.scala#L81) | Number of instruction lanes visible to decode and number of uops that can be handed to rename per cycle. Default configs use `8/8`; `TLBackendV2Config` reduces both to `6/6` in [Configs.scala:510](src/main/scala/top/Configs.scala#L510) and [Configs.scala:511](src/main/scala/top/Configs.scala#L511). |
 | [`MaxUopSize`](src/main/scala/xiangshan/Parameters.scala#L85) | Upper bound on the number of uops a single complex instruction may generate. It sizes `uopIdx`, `numWB`, and the internal storage of `DecodeUnitComp`. |
-| [`VLEN`](src/main/scala/xiangshan/Parameters.scala#L53), [`HasVPU`](src/main/scala/xiangshan/Parameters.scala#L70) | Determine whether vector decode paths exist and affect translations such as `csrr vlenb -> addi imm = VLEN/8` ([DecodeUnit.scala:1199](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L1199)). |
-| [`IntLogicRegs`](src/main/scala/xiangshan/Parameters.scala#L91), [`FpLogicRegs`](src/main/scala/xiangshan/Parameters.scala#L92), [`VecLogicRegs`](src/main/scala/xiangshan/Parameters.scala#L93), [`V0LogicRegs`](src/main/scala/xiangshan/Parameters.scala#L94), [`VlLogicRegs`](src/main/scala/xiangshan/Parameters.scala#L95) | Define the logical name spaces that decode presents to the RAT read ports. These spaces are wider than the ISA architectural register sets because XiangShan includes internal logical names such as vector temporaries and the dedicated `vl` file. |
+| [`VLEN`](src/main/scala/xiangshan/Parameters.scala#L53) | Sets vector register width and therefore directly affects decode rewrites such as `csrr vlenb -> addi imm = VLEN/8` ([DecodeUnit.scala:1199](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L1199)). |
+| [`IntLogicRegs`](src/main/scala/xiangshan/Parameters.scala#L91), [`FpLogicRegs`](src/main/scala/xiangshan/Parameters.scala#L92), [`VecLogicRegs`](src/main/scala/xiangshan/Parameters.scala#L93), [`V0LogicRegs`](src/main/scala/xiangshan/Parameters.scala#L94), [`VlLogicRegs`](src/main/scala/xiangshan/Parameters.scala#L95) | Define the logical name spaces that decode presents to the RAT read ports. Integer decode uses the architectural 32-entry namespace directly; the floating-point and vector spaces add internal names, and `v0`/`vl` are modeled as dedicated one-entry logical files. |
 
 The structural takeaway is simple: width parameters control throughput, while vector parameters determine how much of
 decode can no longer be treated as a purely scalar, stateless lookup.
@@ -762,7 +766,7 @@ It is useful to mentally group these parameters into three buckets.
 
 - Throughput parameters such as `DecodeWidth` and `RenameWidth` set how much work can move each cycle.
 - Expansion-capacity parameters such as `MaxUopSize` size the shared complex machinery.
-- Architectural-shape parameters such as `VLEN`, `HasVPU`, and the logical register-space sizes determine how many
+- Architectural-shape parameters such as `VLEN` and the logical register-space sizes determine how many
   namespaces and decode subpaths must exist at all.
 
 That grouping mirrors the real design pressures on the stage: bandwidth, internal complexity, and ISA feature scope.
@@ -829,7 +833,8 @@ expansion path.
    [UopInfoGen.scala:198](src/main/scala/xiangshan/backend/decode/UopInfoGen.scala#L198)).
 
 4. `DecodeUnitComp` expands it into two uops. The first writes the scalar destination through `FuType.vsetiwi`; the
-   second writes the dedicated `vl` destination and associated vector configuration
+   second stays on the `FuType.vsetiwf` path and writes the dedicated `vl` destination together with the vector
+   configuration update
    ([DecodeUnitComp.scala:283](src/main/scala/xiangshan/backend/decode/DecodeUnitComp.scala#L283) to
    [DecodeUnitComp.scala:292](src/main/scala/xiangshan/backend/decode/DecodeUnitComp.scala#L292)).
 
