@@ -47,13 +47,72 @@ Key submodules:
 
 ## 4) Build, Validation, and Dev Commands
 
-Environment and setup:
-- `make init` or `make init-force`
+### Prerequisites
 
-Build and simulation:
+Required environment variables (set before any build or simulation command):
+- `NOOP_HOME` — path to the XiangShan repository root (e.g., `/home/user/work/XiangShan`)
+- `NEMU_HOME` — path to directory containing the NEMU reference model `.so` file;
+  when using the prebuilt binary from `ready-to-run/`, set to `$NOOP_HOME/ready-to-run`
+- `VERILATOR_ROOT` — path to the Verilator data directory containing `include/verilated.mk`
+  (e.g., `/usr/share/verilator` or `~/.local/share/verilator`). Required if Verilator is not
+  installed at the default `/usr/share/verilator` location.
+
+Required tools:
+- **Verilator >= 5.024** (5.020 is too old; the difftest submodule uses `VerilatedTraceBaseC`
+  which was introduced after 5.020)
+- **espresso** logic minimizer — a platform-native binary must be at
+  `src/main/resources/espresso`. The repository may ship a macOS ARM64 binary; on Linux x86_64,
+  replace it with the Linux build (e.g., `git show kunminghu-v3:src/main/resources/espresso > src/main/resources/espresso && chmod +x src/main/resources/espresso`)
+
+### Submodule initialization
+
+```bash
+git submodule update --init --recursive --force
+```
+
+`make init` only runs `git submodule update --init` (non-recursive), which does **not** fetch
+sub-submodules like `rocket-chip/cde` and `rocket-chip/hardfloat`. Always use `--recursive`.
+
+After init, verify `ready-to-run/` has actual files (not just a `.git` pointer). If the
+directory is empty, run `cd ready-to-run && git restore --staged . && git checkout -- .`
+
+### NEMU reference model setup
+
+The difftest emulator loads `$NEMU_HOME/build/riscv64-nemu-interpreter-so` at runtime.
+The prebuilt `.so` lives at `ready-to-run/riscv64-nemu-interpreter-so` (no `build/` subdirectory),
+so create a symlink:
+
+```bash
+mkdir -p ready-to-run/build
+ln -sf ../riscv64-nemu-interpreter-so ready-to-run/build/riscv64-nemu-interpreter-so
+```
+
+### Build commands
+
+Verilog generation:
 - `make verilog CONFIG=TLConfig`
 - `make sim-verilog CONFIG=TLConfig`
-- `make emu -j16 CONFIG=TLConfig`
+
+Emulator build (example with all required env vars):
+```bash
+NOOP_HOME=$(pwd) VERILATOR_ROOT=/usr/share/verilator \
+  make emu -j16 CONFIG=TLConfig
+```
+
+Emulator build with FST waveform trace support:
+```bash
+NOOP_HOME=$(pwd) VERILATOR_ROOT=/usr/share/verilator \
+  make emu -j16 CONFIG=TLConfig EMU_TRACE=fst
+```
+
+Use `EMU_TRACE=1` for VCD format instead.
+
+**Important:** If you change the Verilator installation or switch between `EMU_TRACE` modes,
+delete the stale verilator compile directory first:
+```bash
+rm -rf build/verilator-compile
+```
+The generated `VSimTop.mk` hardcodes the `VERILATOR_ROOT` path from the previous run.
 
 Tests and formatting:
 - `make test`
@@ -62,18 +121,64 @@ Tests and formatting:
 - `make reformat`
 - `make clean`
 
-Wave dump flow (emu):
-- Build with trace:
-  - `make emu CONFIG=TLConfig EMU_TRACE=1` (VCD)
-  - `make emu -j16 CONFIG=TLConfig EMU_TRACE=fst` (FST)
-- Run with dump:
-  - `./build/emu -i ./ready-to-run/coremark-2-iteration.bin --dump-wave`
-  - Optional: `--dump-wave-full`
-  - Optional: `--wave-path ./build/xs.vcd`
-- Note: if built without `EMU_TRACE`, runtime dump flags do not work.
-- Note: `--enable-fork` disables waveform dumping.
+### Running simulation with waveform dump
 
-macOS reminder:
+```bash
+NEMU_HOME=$(pwd)/ready-to-run \
+  ./build/emu -i ./ready-to-run/coremark-2-iteration.bin \
+  --dump-wave-full --wave-path ./build/coremark.fst
+```
+
+- `--dump-wave` — dump waveform (may omit some internal signals like clocks)
+- `--dump-wave-full` — dump **all** signals including clocks (use this for full visibility)
+- `--wave-path <path>` — output file path (extension matches `EMU_TRACE` format)
+- Without `EMU_TRACE` at build time, runtime dump flags silently do nothing
+- `--enable-fork` disables waveform dumping
+
+### Running simulation with instruction commit trace
+
+The difftest infrastructure can dump every committed instruction to stdout via the
+`--dump-commit-trace` flag. The trace is printed by the `Info()` macro in
+`difftest/src/test/csrc/difftest/diffstate.cpp`, which calls `eprintf` → `vprintf`,
+writing to **stdout**.
+
+Each committed instruction prints: PC, opcode, register writeback (destination register,
+data), load/store queue index, and Spike disassembly (if available).
+
+| Flag | Purpose |
+|---|---|
+| `--dump-commit-trace` | Log every committed instruction (DUT side) to stdout |
+| `--dump-ref-trace` | Log reference model (NEMU) execution trace |
+| `-b NUM` / `--log-begin=NUM` | Start tracing at cycle NUM |
+| `-e NUM` / `--log-end=NUM` | Stop tracing at cycle NUM |
+
+Example — full commit trace redirected to a file:
+```bash
+NEMU_HOME=$(pwd)/ready-to-run \
+  ./build/emu -i ./ready-to-run/coremark-2-iteration.bin \
+  --dump-commit-trace > ./build/commit-trace.log
+```
+
+Combined with waveform dump:
+```bash
+NEMU_HOME=$(pwd)/ready-to-run \
+  ./build/emu -i ./ready-to-run/coremark-2-iteration.bin \
+  --dump-commit-trace --dump-wave-full --wave-path ./build/coremark.fst \
+  > ./build/commit-trace.log
+```
+
+Windowed trace (cycles 1000–2000 only):
+```bash
+NEMU_HOME=$(pwd)/ready-to-run \
+  ./build/emu -i ./ready-to-run/coremark-2-iteration.bin \
+  --dump-commit-trace -b 1000 -e 2000 > ./build/commit-trace.log
+```
+
+**Important:** Do not combine `--enable-fork` with tracing or waveform dump flags — fork
+mode disables both.
+
+### macOS notes
+
 - `source ./setvars_osx.sh`
 - `mill clean xiangshan.forkEnv` after env/PATH changes
 - Then run `make verilog` or `make -B verilog`
