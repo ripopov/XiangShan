@@ -18,7 +18,7 @@ control information rather than raw instruction encodings.
 
 In Kunminghu, decode is not just a combinational opcode table. It is a small subsystem at the front of `CtrlBlock`: a
 timing buffer in front of `DecodeStage`, a wide bank of simple per-lane decoders, a shared complex expander for vector
-and `AMOCAS` instructions, speculative `vtype` tracking, and a post-decode fusion pass before rename. The top-level
+and `AMOCAS` (Atomic Compare-and-Swap, from the RISC-V Zacas extension) instructions, speculative `vtype` tracking, and a post-decode fusion pass before rename. The top-level
 instantiation is in
 [CtrlBlock.scala:97](src/main/scala/xiangshan/backend/CtrlBlock.scala#L97),
 [CtrlBlock.scala:99](src/main/scala/xiangshan/backend/CtrlBlock.scala#L99), and
@@ -57,7 +57,7 @@ machine-usable fields.
 
 For a plain integer instruction, these answers look obvious. That is exactly why it is easy to underestimate decode.
 The stage looks simple when viewed through scalar examples. The complexity appears when we ask the same questions for
-CSR instructions, vector loads, `vsetvli`, `AMOCAS`, fused instruction pairs, and operations whose legality depends on
+CSR instructions, vector loads, `vsetvli` (a vector configuration instruction that sets `vtype` and `vl`), `AMOCAS`, fused instruction pairs, and operations whose legality depends on
 privileged state.
 
 ### 11.1.2 A simple mental model
@@ -81,7 +81,9 @@ XiangShan, decode has to do more because the backend is wide, speculative, and e
 
 First, the backend is **out of order**. That means dependencies have to be made explicit before issue queues and the
 ROB ever see the instruction. Second, XiangShan supports **vector state** whose interpretation depends on the current
-`vtype` and `vstart`, so legality is not determined by opcode bits alone. Third, some architectural instructions are
+`vtype` (the vector-type CSR encoding element width, register grouping, and tail/mask policy)
+and `vstart` (the CSR indicating the element index at which a vector instruction begins or resumes execution),
+so legality is not determined by opcode bits alone. Third, some architectural instructions are
 best represented internally as a small group of uops rather than one monolithic action. Fourth, XiangShan performs
 **instruction fusion** after decode but before rename, so decode must produce information that is still useful even when
 adjacent instructions may later be collapsed. Finally, legality is partly controlled by privileged state, so decode
@@ -373,7 +375,7 @@ Inside `DecodeStage`, XiangShan instantiates one `DecodeUnit` per visible instru
 ([DecodeStage.scala:109](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L109) to
 [DecodeStage.scala:128](src/main/scala/xiangshan/backend/decode/DecodeStage.scala#L128)). Each `DecodeUnit` performs a
 table lookup over the union of scalar integer, floating-point, bit-manipulation, crypto, debug, cache-management,
-hypervisor, vector, `Zicond`, `Zimop`, and `Zfa` decode tables
+hypervisor, vector, `Zicond` (integer conditional operations), `Zimop` (may-be-operations, reserved opcodes for future extensions), and `Zfa` (additional floating-point instructions) decode tables
 ([DecodeUnit.scala:798](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L798) to
 [DecodeUnit.scala:810](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L810)).
 
@@ -430,7 +432,10 @@ This simple path also performs several *translations* from architectural instruc
   [DecodeUnit.scala:1173](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L1173)).
 
 One more rewrite matters for vector memory: the simple decoder first recognizes generic `vldu` or `vstu`, then
-converts segmented operations into `vsegldu` or `vsegstu` based on `NF`, `MOP`, and `LUMOP/SUMOP`
+converts segmented vector memory operations (which access multiple contiguous fields per element, for example
+loading successive members of a structure) into `vsegldu` or `vsegstu` based on vector memory encoding fields:
+`NF` (number of fields minus one), `MOP` (memory addressing mode: unit-stride, strided, or indexed),
+and `LUMOP`/`SUMOP` (unit-stride sub-operation selectors for loads and stores)
 ([DecodeUnit.scala:1184](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L1184) to
 [DecodeUnit.scala:1197](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L1197)).
 
@@ -443,17 +448,19 @@ that makes later stages cleaner.
 Decode performs two layers of legality checking.
 
 The first layer is scalar and privilege-aware. `CSRToDecode` exposes mode-dependent legality conditions such as
-`sfence`/`hfence` permissions, `FS`/`VS` state, `WFI` enable rules, and cache-management permissions
+`sfence`/`hfence` permissions, `FS`/`VS` state (the floating-point and vector unit status fields in `mstatus`
+that control whether FP and vector instructions are legal), `WFI` enable rules, and cache-management permissions
 ([CSR.scala:417](src/main/scala/xiangshan/backend/fu/wrapper/CSR.scala#L417),
 [NewCSR.scala:1478](src/main/scala/xiangshan/backend/fu/NewCSR/NewCSR.scala#L1478) to
 [NewCSR.scala:1512](src/main/scala/xiangshan/backend/fu/NewCSR/NewCSR.scala#L1512)).
 `DecodeUnit` combines those signals with local checks such as invalid decode table hits, reserved rounding modes,
-`aes64ks1i` immediates, and `amocas.q` register alignment
+`aes64ks1i` (a scalar cryptography key-schedule instruction) immediates, and `amocas.q` register alignment
 ([DecodeUnit.scala:877](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L877) to
 [DecodeUnit.scala:916](src/main/scala/xiangshan/backend/decode/DecodeUnit.scala#L916)).
 
 The second layer is vector-specific. Full vector legality is deferred to `VecExceptionGen` in the complex path, because
-those checks depend on `vtype`, `vstart`, EEW/EMUL relationships, segment width, register grouping, and overlap rules
+those checks depend on `vtype`, `vstart`, EEW (Effective Element Width) and EMUL (Effective LMUL — the per-instruction register grouping that may
+differ from the `vtype` default) relationships, segment width, register grouping, and overlap rules
 ([VecExceptionGen.scala:174](src/main/scala/xiangshan/backend/decode/VecExceptionGen.scala#L174) to
 [VecExceptionGen.scala:294](src/main/scala/xiangshan/backend/decode/VecExceptionGen.scala#L294)).
 
@@ -713,7 +720,7 @@ keep control sequencing simple when structured metadata can carry most of the va
 ### 11.5.3 Instruction fusion at the decode-to-rename boundary
 
 Fusion is a separate module, but architecturally it still belongs to the decode stage because it transforms adjacent
-decoded instructions *before* rename sees them. `CtrlBlock` disables fusion in single-step mode or when CSR state clears
+decoded instructions *before* rename sees them. `CtrlBlock` disables fusion in single-step mode (a debug feature where the processor traps after executing one instruction) or when CSR state clears
 `fusion_enable` ([CtrlBlock.scala:108](src/main/scala/xiangshan/backend/CtrlBlock.scala#L108)).
 
 The `FusionDecoder` works in two steps
