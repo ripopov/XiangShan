@@ -303,17 +303,14 @@ and one SN-F (memory). We use CHI transaction names and message types throughout
 **Scenario:** Core 0 loads address X. X is not in Core 0's L2 (state I). The HN-F directory says
 X is not cached by any RN-F (also state I).
 
-```text
-   RN-F 0              HN-F (directory)           SN-F (memory)
-     │                       │                          │
-     │── ReadNotSharedDirty(X) ─>│                       │
-     │     [REQ channel]     │                          │
-     │<── CompData(X, UC) ───│                          │
-     │    [DAT channel]      │                          │
-     │                       │                          │
-     │──── CompAck ─────────>│                          │
-     │    [RSP channel]      │                          │
-     │                       │                          │
+```mermaid
+sequenceDiagram
+    participant RN0 as RN-F 0
+    participant HNF as HN-F (directory)
+    participant SNF as SN-F (memory)
+    RN0->>HNF: ReadNotSharedDirty(X) [REQ]
+    HNF->>RN0: CompData(X, UC) [DAT]
+    RN0->>HNF: CompAck [RSP]
 ```
 
 **Step 1.** RN-F 0 sends a `ReadNotSharedDirty` request on the REQ channel. In XiangShan's OpenLLC,
@@ -343,24 +340,16 @@ add one request/response round trip.
 **Scenario:** Core 0 holds X in state UD (Unique Dirty - it has written to X). Core 1 now wants
 to read X. In OpenLLC this path uses `ReadNotSharedDirty`, not `ReadShared`.
 
-```text
-   RN-F 0              HN-F (directory)           RN-F 1
-     │                       │                       │
-     │                       │<── ReadNotSharedDirty(X) ─│
-     │                       │    [REQ channel]          │
-     │                       │                           │
-     │<── SnpNotSharedDirty(X) ──│                       │
-     │    [SNP channel]      │                           │
-     │                       │                           │
-     │── SnpRespData(X) ────>│                           │
-     │   [DAT channel]       │                           │
-     │                       │                           │
-     │                       │── CompData(X, SC) ───────>│
-     │                       │   [DAT channel]           │
-     │                       │                           │
-     │                       │<──── CompAck ─────────────│
-     │                       │     [RSP channel]         │
-     │                       │                       │
+```mermaid
+sequenceDiagram
+    participant RN0 as RN-F 0
+    participant HNF as HN-F (directory)
+    participant RN1 as RN-F 1
+    RN1->>HNF: ReadNotSharedDirty(X) [REQ]
+    HNF->>RN0: SnpNotSharedDirty(X) [SNP]
+    RN0->>HNF: SnpRespData(X) [DAT]
+    HNF->>RN1: CompData(X, SC) [DAT]
+    RN1->>HNF: CompAck [RSP]
 ```
 
 **Step 1.** RN-F 1 sends `ReadNotSharedDirty(X)` to the HN-F. That is the normal read opcode in
@@ -388,24 +377,16 @@ track of the dirty responsibility internally.
 **Scenario:** X is in state SC at RN-F 0 and SC at RN-F 1 (both shared, clean copies). Core 0
 wants to write to X and needs exclusive ownership.
 
-```text
-   RN-F 0              HN-F (directory)           RN-F 1
-     │                       │                       │
-     │── MakeUnique(X) ─────>│                       │
-     │   [REQ channel]       │                       │
-     │                       │                       │
-     │                       │── SnpMakeInvalid(X) ──>│
-     │                       │   [SNP channel]        │
-     │                       │                       │
-     │                       │<── SnpResp(I) ────────│
-     │                       │    [RSP channel]      │
-     │                       │                       │
-     │<──── Comp(UC) ────────│                       │
-     │      [RSP channel]    │                       │
-     │                       │                       │
-     │──── CompAck ─────────>│                       │
-     │    [RSP channel]      │                       │
-     │                       │                       │
+```mermaid
+sequenceDiagram
+    participant RN0 as RN-F 0
+    participant HNF as HN-F (directory)
+    participant RN1 as RN-F 1
+    RN0->>HNF: MakeUnique(X) [REQ]
+    HNF->>RN1: SnpMakeInvalid(X) [SNP]
+    RN1->>HNF: SnpResp(I) [RSP]
+    HNF->>RN0: Comp(UC) [RSP]
+    RN0->>HNF: CompAck [RSP]
 ```
 
 **Step 1.** RN-F 0 sends `MakeUnique(X)`. This is a *dataless* transaction: RN-F 0 already has
@@ -433,21 +414,15 @@ exceeds K; the snoop filter keeps storage proportional to the aggregate L2 size.
 
 **Scenario:** RN-F 0 holds X in state UD (dirty) and must evict it to make room for a new line.
 
-```text
-   RN-F 0              HN-F (directory)           SN-F (memory)
-     │                       │                          │
-     │── WriteBackFull(X) ──>│                          │
-     │   [REQ channel]       │                          │
-     │                       │                          │
-     │<── CompDBIDResp ──────│                          │
-     │    [RSP channel]      │                          │
-     │                       │                          │
-     │── CBWrData(X, data) ─>│                          │
-     │   [DAT channel]       │                          │
-     │                       │                          │
-     │                       │── WriteNoSnp(X, data) ──>│
-     │                       │   (optional, to memory)  │
-     │                       │                          │
+```mermaid
+sequenceDiagram
+    participant RN0 as RN-F 0
+    participant HNF as HN-F (directory)
+    participant SNF as SN-F (memory)
+    RN0->>HNF: WriteBackFull(X) [REQ]
+    HNF->>RN0: CompDBIDResp [RSP]
+    RN0->>HNF: CBWrData(X, data) [DAT]
+    HNF-->>SNF: WriteNoSnp(X, data) (optional)
 ```
 
 **Step 1.** RN-F 0 sends `WriteBackFull(X)` on the REQ channel. This notifies the HN-F that a
