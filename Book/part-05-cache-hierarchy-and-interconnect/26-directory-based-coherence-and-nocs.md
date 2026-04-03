@@ -706,9 +706,634 @@ depends on workload sharing patterns and interconnect design.
 
 ---
 
-## 26.6 Design Trade-Offs
+## 26.6 Scaling Up: Distributed LLC on a Mesh Network
 
-### 26.6.1 Snooping vs. directory
+### 26.6.1 The single-home bottleneck
+
+The worked example in Section 26.5 placed a single HN-F at one node on a ring. Every coherence
+request — reads, writes, writebacks, evictions — funnels through that single home node. The HN-F's
+directory lookup bandwidth, its MSHR pool depth, and the links to and from it become the throughput
+ceiling of the entire system. At 4 cores and moderate miss rates, one HN-F keeps up. At 8 or 16
+cores, it cannot: the home node's request queue fills, outgoing snoop bandwidth saturates, and every
+transaction pays extra latency waiting for arbitration at the congested node.
+
+The solution parallels the reason caches exist in the first place: **partition and distribute**.
+Instead of a single monolithic LLC with one directory, the L3 cache and its directory are **sliced**
+into multiple HN-F instances, each responsible for a disjoint subset of the address space. Each
+HN-F slice has its own MSHR pool, its own directory storage, and its own data array. Because
+requests for different addresses go to different HN-F slices, the aggregate request-processing
+throughput scales linearly with the number of slices.
+
+```text
+Single HN-F (bottleneck):                 Distributed HN-F (scales):
+
+  RN-F 0  RN-F 1  ...  RN-F 7               RN-F 0    RN-F 1   ...  RN-F 7
+    │        │            │                    │  │       │  │          │  │
+    └────────┴─────┬──────┘                    │ HN-F 0  │ HN-F 1 ... │ HN-F 7
+                   │                           │  │       │  │          │  │
+              ┌────┴────┐                      └──┴───────┴──┴──────────┴──┘
+              │  HN-F   │ ← all traffic                 Mesh fabric
+              │ (single │   goes here        Each HN-F handles 1/8 of addresses.
+              │  point) │                    8× aggregate directory bandwidth.
+              └────┬────┘                    8× aggregate data bandwidth.
+                   │
+              ┌────┴────┐
+              │  SN-F   │
+              └─────────┘
+```
+
+This is how virtually every modern many-core interconnect works. ARM's CMN-600 and CMN-700 mesh
+interconnects distribute HN-F slices across mesh nodes. Intel's server-class Xeon mesh similarly
+distributes LLC slices across a 2D grid. The pattern is universal because the physics is universal:
+wire delay across a large die means that a centralized resource cannot serve a large number of
+distributed requesters at both high throughput and low latency.
+
+### 26.6.2 Address interleaving: mapping lines to home nodes
+
+When multiple HN-F nodes exist, each coherence request must be routed to the **correct** HN-F —
+the one that owns the target address. The mapping from address to HN-F is called **address
+interleaving** (or address hashing).
+
+The simplest scheme uses a contiguous group of address bits to select the HN-F. For 8 HN-F slices,
+three bits suffice. Which bits to use matters:
+
+**Low-order interleaving** (e.g., bits [8:6] after removing the 6-bit cache-line offset) distributes
+consecutive cache lines round-robin across different HN-F slices. A sequential memory scan touches
+all slices in rotation, balancing load well for streaming workloads.
+
+**High-order interleaving** (e.g., bits [35:33]) assigns large contiguous address regions to each
+HN-F. Consecutive cache lines go to the same slice, creating spatial locality within slices but
+risking imbalanced load when a workload's hot data falls in one region.
+
+**Hash-based interleaving** XORs bits from different parts of the address to compute the HN-F
+index. This provides robust load balancing across diverse access patterns, at the cost of a small
+amount of combinational logic. ARM's CMN mesh uses a configurable hash of this kind.
+
+```text
+Address:  [ tag bits | ... | bits 8:6 | line offset 5:0 ]
+                             └──┬──┘
+                           HN-F index
+                           (3 bits → selects one of 8 HN-F slices)
+
+Example (64-byte cache lines, low-order interleaving):
+  Address 0x0000 → line offset 0x00, bits [8:6] = 000 → HN-F 0
+  Address 0x0040 → line offset 0x00, bits [8:6] = 001 → HN-F 1
+  Address 0x0080 → line offset 0x00, bits [8:6] = 010 → HN-F 2
+  ...
+  Address 0x01C0 → line offset 0x00, bits [8:6] = 111 → HN-F 7
+  Address 0x0200 → line offset 0x00, bits [8:6] = 000 → HN-F 0  (wraps)
+```
+
+For the examples in this section, we use a simple 3-bit interleaving: `HN-F index = addr[8:6]`,
+which distributes every group of 8 consecutive cache lines across all 8 HN-F slices. The key
+invariant is that the mapping is a **pure function of the address** — every node in the system can
+independently compute which HN-F owns any given address, so requests are routed deterministically
+without any lookup table.
+
+### 26.6.3 System architecture: a 4×2 mesh with distributed HN-F slices
+
+We now introduce a concrete system that serves as the running example for the rest of this section:
+a **4×2 mesh** with 8 nodes, each containing a CPU core (RN-F) and an LLC slice (HN-F).
+
+```text
+       Col 0         Col 1         Col 2         Col 3
+     ┌────────┐    ┌────────┐    ┌────────┐    ┌────────┐
+     │ Node 0 │────│ Node 1 │────│ Node 2 │────│ Node 3 │   Row 0
+     │RN-F 0  │    │RN-F 1  │    │RN-F 2  │    │RN-F 3  │
+     │HN-F 0  │    │HN-F 1  │    │HN-F 2  │    │HN-F 3  │
+     └───┬────┘    └───┬────┘    └───┬────┘    └───┬────┘
+         │             │             │             │
+     ┌───┴────┐    ┌───┴────┐    ┌───┴────┐    ┌───┴────┐
+     │ Node 4 │────│ Node 5 │────│ Node 6 │────│ Node 7 │   Row 1
+     │RN-F 4  │    │RN-F 5  │    │RN-F 6  │    │RN-F 7  │
+     │HN-F 4  │    │HN-F 5  │    │HN-F 6  │    │HN-F 7  │
+     └────────┘    └────────┘    └────────┘    └────────┘
+
+  ── horizontal link (East-West)       │ vertical link (North-South)
+```
+
+Each mesh node contains three logical components sharing a physical tile:
+
+- A **mesh router** with 5 ports: North, South, East, West, and Local. The local port connects
+  the router to the node's RN-F and HN-F.
+- An **RN-F** (Request Node): a CPU core with private L1 and L2 caches. RN-F k issues coherence
+  requests and responds to snoops.
+- An **HN-F** (Home Node): one slice of the distributed L3 cache, containing a data array, a
+  directory (snoop filter), and an MSHR pool. HN-F k is the Point-of-Coherence and
+  Point-of-Serialization for every address that hashes to slice k.
+
+Memory controllers (**SN-F** nodes) attach at the mesh periphery — for instance, one SN-F at
+Node 0 and another at Node 7 — but we omit them from most transaction traces below to focus on
+the LLC-hit path and snoop interactions.
+
+**Routing.** The mesh uses deterministic **XY routing**: a message first travels in the X direction
+(East or West) until it reaches the destination's column, then turns and travels in the Y direction
+(North or South) to the destination's row. Each hop (one link traversal plus one router pipeline
+stage) takes 1 cycle in our simplified model.
+
+**Hop distances.** The hop count between any two nodes is the Manhattan distance of their
+(column, row) coordinates:
+
+| From \ To | N0 (0,0) | N1 (1,0) | N2 (2,0) | N3 (3,0) | N4 (0,1) | N5 (1,1) | N6 (2,1) | N7 (3,1) |
+|---|---|---|---|---|---|---|---|---|
+| **N0** | 0 | 1 | 2 | 3 | 1 | 2 | 3 | 4 |
+| **N1** | 1 | 0 | 1 | 2 | 2 | 1 | 2 | 3 |
+| **N2** | 2 | 1 | 0 | 1 | 3 | 2 | 1 | 2 |
+| **N3** | 3 | 2 | 1 | 0 | 4 | 3 | 2 | 1 |
+| **N4** | 1 | 2 | 3 | 4 | 0 | 1 | 2 | 3 |
+| **N5** | 2 | 1 | 2 | 3 | 1 | 0 | 1 | 2 |
+| **N6** | 3 | 2 | 1 | 2 | 2 | 1 | 0 | 1 |
+| **N7** | 4 | 3 | 2 | 1 | 3 | 2 | 1 | 0 |
+
+The maximum hop count in this 4×2 mesh is **4 hops** (between diagonal corners: Node 0 ↔ Node 7
+and Node 3 ↔ Node 4). The average hop count across all 56 directed pairs is **1.86 hops**.
+
+**Key property: non-uniform access latency.** Unlike a crossbar (where every pair of nodes is 1
+hop apart) or a bus (where all nodes see the same latency), a mesh creates **distance-dependent
+latency**. A request from RN-F 0 to HN-F 1 (1 hop) is four times faster than a request from RN-F 0
+to HN-F 7 (4 hops). Combined with address hashing, this means a given core's average LLC access
+latency depends on how its working set distributes across HN-F slices. With good hashing (uniform
+distribution), the average latency converges to the mean hop count. With pathological address
+patterns, a core can see consistently high latency if its hot addresses happen to hash to distant
+slices. This is a **non-uniform cache access (NUCA)** effect — analogous to traditional NUMA for
+memory controllers, but operating at the LLC level.
+
+### 26.6.4 Transaction anatomy in a distributed-directory mesh
+
+A coherence transaction in a multi-HN-F mesh involves up to four phases, each requiring message
+routing through the mesh fabric:
+
+**Phase 1 — Request routing.** The requesting RN-F computes the target HN-F from the address hash
+and injects a REQ flit into the mesh. The mesh routers forward it hop by hop using XY routing
+until it arrives at the target HN-F's node. If the target HN-F is co-located with the requesting
+RN-F (same node), this phase costs zero mesh hops — the request is delivered through the router's
+local port.
+
+**Phase 2 — Directory lookup and snoop dispatch.** The target HN-F allocates an MSHR, looks up the
+address in its directory, and determines whether snoops are needed. If so, SNP flits are injected
+into the mesh toward the relevant RN-F nodes. When multiple RN-Fs need snooping, the HN-F issues
+all snoop messages at once; they travel in different directions through the mesh simultaneously.
+
+**Phase 3 — Snoop response.** Each snooped RN-F processes the snoop and sends a response (RSP or
+DAT flit) back through the mesh. Two important variants exist:
+
+- In the **4-hop flow**, the snooped RN-F's data returns to the HN-F, which then forwards it to
+  the requester. The HN-F sits on the critical data path.
+- In the **3-hop flow** (Direct Cache Transfer, DCT), the HN-F instructs the snooped RN-F to send
+  data **directly** to the requester, bypassing the HN-F for the data payload. The snoop message
+  carries the requester's node ID in the `FwdNID` field. Only a lightweight snoop response (no
+  data) returns to the HN-F.
+
+**Phase 4 — Completion.** The requester receives data and/or a completion response. It sends a
+CompAck back to the HN-F so the HN-F can retire the MSHR and release the directory lock.
+
+The total number of mesh hops for a transaction depends on three distances:
+
+| Symbol | Meaning |
+|---|---|
+| d(R,H) | Hop distance from requester to home HN-F |
+| d(H,S) | Hop distance from home HN-F to snooped RN-F |
+| d(S,R) | Hop distance from snooped RN-F to requester (direct) |
+
+For a read miss with one snoop:
+
+| Flow | Critical-path hops | Messages on critical path |
+|---|---|---|
+| **No snoop** (LLC hit) | 2 × d(R,H) | REQ + CompData |
+| **4-hop** (data via home) | d(R,H) + d(H,S) + d(S,H) + d(H,R) | REQ, SNP, SnpRespData, CompData |
+| **3-hop** (DCT, direct) | d(R,H) + d(H,S) + d(S,R) | REQ, SNP, CompData(direct) |
+
+In the 4-hop case, the critical path includes two traversals between the home and the snooped node
+(snoop out, data back), plus the return to the requester. In the 3-hop case, the return path is
+d(S,R) — a single direct transfer — instead of d(S,H) + d(H,R). When the requester and owner are
+close to each other but both are far from the home, DCT can save many cycles.
+
+### 26.6.5 Tracing transactions on the 4×2 mesh
+
+We now trace five concrete transactions to show how addresses, topology, and snoop patterns
+interact on the 4×2 mesh.
+
+**Assumptions:**
+- Address X hashes to **HN-F 5** (at Node 5, position (1,1)).
+- Address Y hashes to **HN-F 6** (at Node 6, position (2,1)).
+- Address Z hashes to **HN-F 3** (at Node 3, position (3,0)).
+- Each mesh hop takes 1 cycle. Directory lookup takes 1 cycle.
+- Initial state for each trace is given in its description.
+
+---
+
+**Trace 1: Local read miss — LLC hit, zero mesh hops**
+
+RN-F 5 at Node 5 reads address X, which hashes to HN-F 5 — the LLC slice co-located at the same
+node. X is not cached by any RN-F, and the data is present in HN-F 5's LLC data array.
+
+```mermaid
+sequenceDiagram
+    participant RN5 as RN-F 5 (Node 5)
+    participant HN5 as HN-F 5 (Node 5)
+    Note over RN5,HN5: Same node — local port, 0 mesh hops
+    RN5->>HN5: ReadNotSharedDirty(X) [REQ, 0 hops]
+    HN5->>HN5: Directory lookup: X is I, LLC hit
+    HN5->>RN5: CompData(X, UC) [DAT, 0 hops]
+    RN5->>HN5: CompAck [RSP, 0 hops]
+```
+
+| Cycle | Event | Mesh hops |
+|---|---|---|
+| 0 | RN-F 5 sends ReadNotSharedDirty(X) → HN-F 5 via local port | 0 |
+| 1 | HN-F 5 directory lookup: X uncached, LLC hit | — |
+| 2 | HN-F 5 sends CompData(X, UC) → RN-F 5 via local port | 0 |
+| 3 | RN-F 5 sends CompAck → HN-F 5 via local port | 0 |
+
+**Total latency:** 2 cycles (request to data). **Total mesh traversals:** 0.
+
+This is the best case: when the requester happens to be at the same node as the responsible HN-F
+and the data is in the LLC, the transaction never enters the mesh fabric. The latency is just the
+directory lookup plus one cycle for the response.
+
+**Directory state after:** X → {RN-F 5, UC} at HN-F 5.
+
+---
+
+**Trace 2: Remote read miss — LLC hit, no snoop needed**
+
+RN-F 0 at Node 0 (0,0) reads address X, which hashes to HN-F 5 at Node 5 (1,1). No cache holds
+X (directory says state I), and the data is in HN-F 5's LLC.
+
+```mermaid
+sequenceDiagram
+    participant RN0 as RN-F 0 (Node 0)
+    participant HN5 as HN-F 5 (Node 5)
+    Note right of RN0: X hashes to HN-F 5, 2 hops away
+    RN0->>HN5: ReadNotSharedDirty(X) [REQ, 2 hops]
+    HN5->>HN5: Directory lookup: X is I, LLC hit
+    HN5->>RN0: CompData(X, UC) [DAT, 2 hops]
+    RN0->>HN5: CompAck [RSP, 2 hops]
+```
+
+XY route from Node 0 (0,0) → Node 5 (1,1): East to (1,0), then South to (1,1) — 2 hops.
+Return route: North to (1,0), then West to (0,0) — 2 hops.
+
+| Cycle | Event | Mesh hops |
+|---|---|---|
+| 0 | RN-F 0 sends ReadNotSharedDirty(X) into mesh | — |
+| 2 | Request arrives at HN-F 5 (2 hops: East then South) | 2 |
+| 3 | HN-F 5 directory lookup: X uncached, LLC hit | — |
+| 4 | HN-F 5 sends CompData(X, UC) into mesh toward Node 0 | — |
+| 6 | CompData arrives at RN-F 0 (2 hops: North then West) | 2 |
+| 7 | RN-F 0 sends CompAck into mesh | — |
+| 9 | CompAck arrives at HN-F 5 (2 hops). MSHR retired. | 2 |
+
+**Total latency:** 6 cycles (request to data). **Total mesh hops:** 6 (3 messages × 2 hops).
+
+Compared to Trace 1, the 2-hop distance to the home node adds 4 cycles of round-trip mesh
+latency. This illustrates the NUCA effect: a core's LLC access time depends on which HN-F slice
+owns the target address.
+
+**Directory state after:** X → {RN-F 0, UC} at HN-F 5.
+
+---
+
+**Trace 3: Read hitting a dirty line at a remote core — 4-hop flow**
+
+RN-F 0 holds address Y in state UD (it has written to Y). Now RN-F 1 at Node 1 (1,0) wants to
+read Y. Address Y hashes to HN-F 6 at Node 6 (2,1).
+
+The three relevant nodes and their distances:
+- **Requester:** RN-F 1 at Node 1 (1,0)
+- **Home:** HN-F 6 at Node 6 (2,1) — d(R,H) = |2−1| + |1−0| = 2 hops
+- **Owner:** RN-F 0 at Node 0 (0,0) — d(H,S) = |0−2| + |0−1| = 3 hops; d(S,R) = |1−0| = 1 hop
+
+```mermaid
+sequenceDiagram
+    participant RN1 as RN-F 1 (Node 1)
+    participant HN6 as HN-F 6 (Node 6)
+    participant RN0 as RN-F 0 (Node 0)
+    RN1->>HN6: ReadNotSharedDirty(Y) [REQ, 2 hops]
+    HN6->>RN0: SnpNotSharedDirty(Y) [SNP, 3 hops]
+    RN0->>HN6: SnpRespData(Y) [DAT, 3 hops]
+    HN6->>RN1: CompData(Y, UC) [DAT, 2 hops]
+    RN1->>HN6: CompAck [RSP, 2 hops]
+```
+
+| Cycle | Event | Mesh hops |
+|---|---|---|
+| 0 | RN-F 1 sends ReadNotSharedDirty(Y) into mesh | — |
+| 2 | Request arrives at HN-F 6 (2 hops: East to col 2, South to row 1) | 2 |
+| 3 | Directory lookup: Y held by RN-F 0 in UD. Issue snoop. | — |
+| 6 | SnpNotSharedDirty(Y) arrives at RN-F 0 (3 hops: West, West, North) | 3 |
+| 7 | RN-F 0 transitions Y → I, sends SnpRespData(Y) toward HN-F 6 | — |
+| 10 | SnpRespData arrives at HN-F 6 (3 hops: East, East, South) | 3 |
+| 11 | HN-F 6 forwards CompData(Y, UC) to RN-F 1 | — |
+| 13 | CompData arrives at RN-F 1 (2 hops: North, West) | 2 |
+| 14 | RN-F 1 sends CompAck to HN-F 6 | — |
+| 16 | CompAck arrives at HN-F 6. MSHR retired. | 2 |
+
+**Total latency:** 13 cycles (request to data, cycle 0 to 13). **Total mesh hops:** 12
+(5 messages).
+
+The critical data path is RN-F 1 → HN-F 6 → RN-F 0 → HN-F 6 → RN-F 1, totaling
+d(R,H) + d(H,S) + d(S,H) + d(H,R) = 2 + 3 + 3 + 2 = **10 hops** on the critical path. The data
+from RN-F 0 must detour through HN-F 6 even though RN-F 0 and RN-F 1 are **direct neighbors**
+(1 hop apart). This detour is the inefficiency that DCT eliminates.
+
+**Directory state after:** Y → {RN-F 1, UC} at HN-F 6.
+
+---
+
+**Trace 4: Same scenario with Direct Cache Transfer — 3-hop flow**
+
+Same setup as Trace 3: RN-F 0 holds Y in UD, RN-F 1 reads Y, home is HN-F 6. But now HN-F 6
+uses **Direct Cache Transfer (DCT)**: the snoop carries `FwdNID = 1` (the requester's node ID)
+and `FwdTxnID`, instructing RN-F 0 to send the data directly to RN-F 1 rather than back to the
+HN-F.
+
+```mermaid
+sequenceDiagram
+    participant RN1 as RN-F 1 (Node 1)
+    participant HN6 as HN-F 6 (Node 6)
+    participant RN0 as RN-F 0 (Node 0)
+    RN1->>HN6: ReadNotSharedDirty(Y) [REQ, 2 hops]
+    HN6->>RN0: SnpNotSharedDirty(Y, FwdNID=1) [SNP, 3 hops]
+    RN0->>RN1: CompData(Y, UC) [DAT, 1 hop — direct!]
+    RN0->>HN6: SnpResp(I) [RSP, 3 hops]
+    RN1->>HN6: CompAck [RSP, 2 hops]
+```
+
+| Cycle | Event | Mesh hops |
+|---|---|---|
+| 0 | RN-F 1 sends ReadNotSharedDirty(Y) into mesh | — |
+| 2 | Request arrives at HN-F 6 (2 hops) | 2 |
+| 3 | Directory lookup: Y held by RN-F 0 in UD. Send snoop with FwdNID=1. | — |
+| 6 | Snoop arrives at RN-F 0 (3 hops) | 3 |
+| 7 | RN-F 0 sends CompData(Y, UC) **directly to RN-F 1** and SnpResp(I) to HN-F 6 | — |
+| **8** | **CompData arrives at RN-F 1 (1 hop: East)** | **1** |
+| 10 | SnpResp(I) arrives at HN-F 6 (3 hops) | 3 |
+| 9 | RN-F 1 sends CompAck to HN-F 6 | — |
+| 11 | CompAck arrives at HN-F 6. MSHR retired. | 2 |
+
+**Total latency:** 8 cycles (request to data, cycle 0 to 8). **Savings: 5 cycles** vs. Trace 3.
+
+The critical data path is now RN-F 1 → HN-F 6 → RN-F 0 → RN-F 1, totaling
+d(R,H) + d(H,S) + d(S,R) = 2 + 3 + 1 = **6 hops** instead of 10. The key insight: d(S,R) = 1
+hop (Node 0 and Node 1 are neighbors) replaces d(S,H) + 1 + d(H,R) = 3 + 1 + 2 = 6 hops (the
+detour through HN-F 6, including one cycle of store-and-forward at the home). DCT is most
+beneficial precisely when communicating cores are **close to each other but far from the home** —
+a situation that arises naturally in producer-consumer sharing patterns where neighboring cores
+exchange data.
+
+```text
+     ┌────────┐    ┌────────┐    ┌────────┐    ┌────────┐
+     │ Node 0 │─1──│ Node 1 │────│ Node 2 │────│ Node 3 │
+     │ Owner  │hop │Requester│   │        │    │        │
+     └───┬────┘    └────────┘    └───┬────┘    └────────┘
+         │                           │
+     ┌───┴────┐    ┌────────┐    ┌───┴────┐    ┌────────┐
+     │ Node 4 │────│ Node 5 │────│ Node 6 │────│ Node 7 │
+     │        │    │        │    │  Home   │    │        │
+     └────────┘    └────────┘    └────────┘    └────────┘
+
+     4-hop data path: Owner → Home → Requester  (3+1+2 = 6 hops + processing)
+     3-hop data path: Owner → Requester          (1 hop, direct)
+```
+
+---
+
+**Trace 5: Write upgrade with multiple sharers — fan-out of invalidations**
+
+Address Z hashes to HN-F 3 at Node 3 (3,0). Z is currently in SC state at three caches: RN-F 0
+(Node 0), RN-F 4 (Node 4), and RN-F 7 (Node 7). RN-F 2 at Node 2 (2,0) wants to write Z and
+needs exclusive ownership.
+
+Hop distances from HN-F 3 (3,0) to each sharer:
+- To RN-F 0 at (0,0): 3 hops (West, West, West)
+- To RN-F 4 at (0,1): 4 hops (West, West, West, South)
+- To RN-F 7 at (3,1): 1 hop (South)
+
+```mermaid
+sequenceDiagram
+    participant RN2 as RN-F 2 (Node 2)
+    participant HN3 as HN-F 3 (Node 3)
+    participant RN0 as RN-F 0 (Node 0)
+    participant RN4 as RN-F 4 (Node 4)
+    participant RN7 as RN-F 7 (Node 7)
+    RN2->>HN3: MakeUnique(Z) [REQ, 1 hop]
+    par Parallel snoop fan-out
+        HN3->>RN0: SnpMakeInvalid(Z) [SNP, 3 hops]
+        HN3->>RN4: SnpMakeInvalid(Z) [SNP, 4 hops]
+        HN3->>RN7: SnpMakeInvalid(Z) [SNP, 1 hop]
+    end
+    RN7->>HN3: SnpResp(I) [RSP, 1 hop]
+    RN0->>HN3: SnpResp(I) [RSP, 3 hops]
+    RN4->>HN3: SnpResp(I) [RSP, 4 hops]
+    Note over HN3: All 3 responses collected
+    HN3->>RN2: Comp(UC) [RSP, 1 hop]
+    RN2->>HN3: CompAck [RSP, 1 hop]
+```
+
+| Cycle | Event | Mesh hops |
+|---|---|---|
+| 0 | RN-F 2 sends MakeUnique(Z) into mesh toward HN-F 3 | — |
+| 1 | Request arrives at HN-F 3 (1 hop: East) | 1 |
+| 2 | Directory lookup: Z shared by {RN-F 0, RN-F 4, RN-F 7}. Issue 3 snoops in parallel. | — |
+| 3 | Three SnpMakeInvalid(Z) messages depart HN-F 3 simultaneously | — |
+| 4 | Snoop arrives at RN-F 7 (1 hop: South). Invalidates Z, sends SnpResp(I). | 1 |
+| 5 | SnpResp from RN-F 7 arrives at HN-F 3 (1 hop). **1st of 3 responses.** | 1 |
+| 6 | Snoop arrives at RN-F 0 (3 hops). Invalidates Z, sends SnpResp(I). | 3 |
+| 7 | Snoop arrives at RN-F 4 (4 hops). Invalidates Z, sends SnpResp(I). | 4 |
+| 9 | SnpResp from RN-F 0 arrives at HN-F 3 (3 hops). **2nd response.** | 3 |
+| 11 | SnpResp from RN-F 4 arrives at HN-F 3 (4 hops). **3rd and final response.** | 4 |
+| 12 | HN-F 3 sends Comp(UC) to RN-F 2 | — |
+| 13 | Comp arrives at RN-F 2 (1 hop: West). RN-F 2 now owns Z exclusively. | 1 |
+| 14 | RN-F 2 sends CompAck to HN-F 3 | — |
+| 15 | CompAck arrives at HN-F 3. MSHR retired. | 1 |
+
+**Total latency:** 13 cycles (request to ownership grant, cycle 0 to 13). **Total mesh hops:** 20
+(7 messages).
+
+The bottleneck is the round-trip to the **farthest sharer**: RN-F 4, which is 4 hops from HN-F 3
+in each direction. The snoop round-trip alone takes 4 + 4 = 8 cycles. RN-F 7 (1 hop away)
+responded 6 cycles earlier, but the HN-F cannot grant ownership until **all** invalidation
+acknowledgments arrive — the slowest sharer determines the latency.
+
+This example illustrates two important principles about write-upgrade cost in a mesh:
+
+1. **Fan-out latency scales with the mesh diameter**, not just the number of sharers. Three sharers
+   at 1 hop each would complete far faster than three sharers scattered across the mesh.
+
+2. **The slowest response dominates.** Adding a fourth sharer at 2 hops would not increase latency
+   at all (it would finish before RN-F 4's response). But adding one sharer at 5 hops — on a
+   larger mesh — would delay the entire transaction. This tail-latency property makes
+   heavily-shared lines (locks, barriers) particularly sensitive to mesh topology and sharer
+   placement.
+
+### 26.6.6 Direct Cache Transfer: when and why it matters
+
+Traces 3 and 4 demonstrated that DCT can save significant latency when the data owner and
+requester are close to each other but both are far from the home node. More formally, DCT saves
+cycles whenever:
+
+> **d(S,R) < d(S,H) + 1 + d(H,R)**
+
+where the "+1" accounts for the store-and-forward cycle at the HN-F. On the 4×2 mesh, this
+condition holds for most triples of (requester, home, owner), making DCT beneficial on average.
+The largest benefit comes from cases like Trace 4, where neighboring cores share data through a
+distant home node.
+
+In CHI, the HN-F enables DCT by setting the `FwdNID` (forward node ID) and `FwdTxnID` (forward
+transaction ID) fields in the snoop message. The snooped RN-F uses these fields to address the
+data response directly to the requester rather than back to the HN-F. The snooped RN-F still
+sends a lightweight `SnpResp` (without data) to the HN-F so the home can update its directory
+and track transaction completion.
+
+There are costs and complications:
+
+**MSHR lifetime.** With DCT, the data arrives at the requester before the HN-F knows the snoop
+completed (the SnpResp arrives at HN-F later). The HN-F must keep the MSHR alive longer,
+waiting for both the SnpResp and the CompAck.
+
+**Ordering.** In the 4-hop flow, the HN-F controls exactly when the requester receives data. With
+DCT, the data arrives at the requester from an unexpected direction (from the owner, not the home).
+The protocol handles this correctly through the CompAck mechanism, but the HN-F must track a state
+where "data has been forwarded directly, but I haven't confirmed completion yet."
+
+**Error recovery.** If the snooped RN-F encounters an error, handling is simpler when data flows
+through the HN-F. With DCT, the error reaches the requester directly, and the HN-F learns about
+it only from the snoop response.
+
+Despite these complications, DCT is nearly universal in modern CHI-based mesh interconnects. ARM's
+CMN-700 and comparable implementations use DCT by default for read-type snoops where the snooped
+cache can supply data. The latency benefit outweighs the additional tracking complexity.
+
+### 26.6.7 Bandwidth scaling in a distributed LLC
+
+The distributed HN-F architecture does more than reduce average latency — it fundamentally changes
+the bandwidth profile of the coherence system.
+
+**Directory bandwidth.** A single HN-F can process one directory lookup per cycle (or a small
+number in a banked design). With 8 HN-F slices, the system can process 8 independent directory
+lookups per cycle, one at each slice. This is critical for workloads with high cache miss rates:
+the aggregate directory throughput scales linearly with slice count.
+
+**Data bandwidth.** Each HN-F slice has its own data array with independent read/write ports. A
+read miss served by HN-F 0's data array does not contend with a read miss served by HN-F 5. The
+aggregate data bandwidth of the distributed LLC is 8× that of a single-slice LLC of the same
+total capacity.
+
+**Link bandwidth.** In a mesh, every link can carry traffic simultaneously. While a REQ flit
+travels East on one link, a DAT flit can travel West on the same link's reverse direction, and
+other messages can traverse independent links elsewhere in the mesh. The aggregate bisection
+bandwidth of the 4×2 mesh — cutting it vertically into left and right halves — equals the number
+of links crossing the cut: 2 bidirectional vertical links, for 4 simultaneous flit transfers.
+This is fundamentally higher than a ring (bisection bandwidth of 2 flits) or a bus (bisection
+bandwidth of 1 flit).
+
+| Architecture | Dir. lookups/cycle | Data read ports | Bisection BW (relative) |
+|---|---|---|---|
+| Single HN-F + bus | 1 | 1 | 1× |
+| Single HN-F + ring (6 nodes) | 1 | 1 | 2× |
+| 8 distributed HN-F + 4×2 mesh | 8 | 8 | 4× |
+
+The distributed design is not free. The interconnect area is larger (8 five-port routers vs. 6
+three-port ring stops), and each HN-F must handle requests from all 8 RN-Fs, not just local ones.
+But for systems with 8 or more cores, the bandwidth scaling makes distribution essential.
+
+### 26.6.8 Keeping private data local
+
+A natural concern with address-interleaved hashing is that **data private to a single core** — its
+stack, thread-local storage, local heap allocations — gets scattered across all 8 HN-F slices.
+Core 2's stack variable at address 0xA040 might hash to HN-F 1, while another at 0xA0C0 hashes
+to HN-F 3. Neither variable is shared with any other core, yet both incur mesh traversal to reach
+a remote HN-F. This seems wasteful: no coherence action is needed for private data, so why pay
+the cost of reaching a distant directory?
+
+In practice, a layered set of mechanisms — from hardware to system software — ensures that most
+private-data accesses never reach the mesh at all, and those that do are handled cheaply.
+
+**Layer 1: Private L1 and L2 caches (the dominant filter).** The most important mechanism is the
+simplest: each core has private L1 and L2 caches that intercept the vast majority of accesses
+before they ever reach the distributed LLC. In XiangShan's default configuration, each core has a
+64 KB L1D cache and a 1 MB L2 cache. A typical application's hot private working set — the current
+stack frame, loop variables, frequently accessed heap objects — fits comfortably in L2. As long as
+Core 2's private data hits in its local L2, no request enters the mesh. The distributed LLC only
+sees **L2 miss traffic**, which is a small fraction of total memory accesses.
+
+To quantify: if Core 2's L2 hit rate for private data is 95% (a conservative figure for many
+workloads), then only 5% of private-data accesses generate mesh traffic. The remaining 95% are
+served locally in 1–10 cycles (L1/L2 latency), never touching any HN-F.
+
+**Layer 2: The LLC hit path is cheap even when remote.** When an L2 miss for private data does
+reach a remote HN-F, the transaction is the simplest kind: the HN-F looks up the directory, finds
+no other sharers (the data is private), and returns the data from its LLC data array. No snoops
+are needed. The cost is just the round-trip mesh latency (2 × d(R,H) hops) plus the directory
+lookup — the same as Trace 2 in Section 26.6.5. The HN-F's snoop bandwidth and MSHR capacity
+are not stressed by these simple transactions, so private-data misses do not create the kind of
+congestion that multi-sharer coherence traffic does.
+
+**Layer 3: OS page coloring for physical address placement.** The operating system controls the
+mapping from virtual addresses to physical addresses through page table entries. Since the HN-F
+selection is determined by bits in the **physical** address, the OS can deliberately choose physical
+pages whose address bits hash to the local HN-F slice. This technique is called **page coloring**
+(or page tinting).
+
+For example, with `HN-F index = PA[8:6]` and 4 KB pages (page offset = PA[11:0]), the HN-F
+selection bits [8:6] fall within the page offset — they are the same in every page and are
+controlled by the virtual-to-physical mapping only at sub-page granularity (which the OS does not
+control). But with larger pages (e.g., 2 MB huge pages), PA[8:6] is well within the region the
+OS controls, and the OS can pick physical huge pages that steer a core's private allocations
+toward its local HN-F slice.
+
+More generally, when the HN-F index is derived from higher-order address bits (or from a hash
+that includes higher-order bits), the OS has direct control. The NUMA-aware memory allocation
+policies in Linux (`mbind`, `set_mempolicy`, and the default first-touch policy) already steer
+physical pages toward the NUMA node nearest to the allocating core. In a mesh with distributed
+HN-F slices, a NUMA-aware allocator that understands the address-to-HN-F mapping can extend
+the same idea to LLC locality.
+
+**Layer 4: Hardware-assisted local caching (system-level caches).** Some mesh interconnects add a
+small **system-level cache (SLC)** or **near cache** at each node that caches copies of LLC data
+fetched from remote HN-F slices. When Core 2 misses in L2 and fetches a line from remote HN-F 5,
+the data is installed in Core 2's L2 as usual, but also in a small SLC at Node 2. On a subsequent
+L2 eviction and re-access, the SLC can supply the data locally without re-traversing the mesh.
+ARM's CMN-700 supports this through configurable SLC slices at each mesh crosspoint. This is
+transparent to software but adds area and complexity.
+
+**The net effect** is a hierarchy of locality filters:
+
+```text
+  Core 2 accesses address A (private data)
+
+  ┌──────────────────────────────────────┐
+  │  L1 hit? ──────── Yes → 1-3 cycles  │  ~90% of accesses
+  │     │ No                             │
+  │  L2 hit? ──────── Yes → 5-10 cycles │  ~7-8% of accesses
+  │     │ No                             │
+  │  (L2 miss → enters mesh)             │  ~2-3% of accesses
+  │     │                                │
+  │  Local HN-F? ──── Yes → ~3 cycles   │  1/8 of L2 misses (by chance)
+  │     │ No                             │  or more with page coloring
+  │  Remote HN-F ──── → 4-12 cycles     │  Remainder
+  │  (no snoops needed for private data) │
+  └──────────────────────────────────────┘
+```
+
+The key insight is that the address hashing "problem" is largely a **cold-miss and capacity-miss
+phenomenon**. It matters only for the small fraction of accesses that miss in the private caches.
+For that fraction, the overhead is mesh traversal latency — not wasted snoop bandwidth or
+coherence traffic. Private-data LLC misses are the cheapest possible transaction type at the HN-F:
+one directory lookup, zero snoops, one data response.
+
+By contrast, **shared data** — the kind that actually needs coherence — benefits enormously from
+distribution because the directory lookup and snoop dispatch are spread across multiple HN-F
+slices rather than serialized at a single point. The design optimizes for the hard case (shared
+data) and accepts modest latency for the easy case (private data), which is the right trade-off
+because the easy case is already filtered by the private cache hierarchy.
+
+---
+
+## 26.7 Design Trade-Offs
+
+### 26.7.1 Snooping vs. directory
 
 Snooping and directory-based coherence are not binary alternatives but endpoints on a spectrum.
 
@@ -728,7 +1353,7 @@ sharing) and directory across clusters (bandwidth efficiency for inter-cluster s
 the architecture of ARM Cortex-A cores in DynamIQ configurations: the DSU handles coherence
 within a 4-core cluster, and the CMN mesh uses CHI directory-based coherence between clusters.
 
-### 26.6.2 Topology trade-offs for XiangShan
+### 26.7.2 Topology trade-offs for XiangShan
 
 XiangShan's current `CHIConfig` uses a crossbar inside OpenLLC to connect RN-F ports to LLC
 slices. This is appropriate for the current design point (2 cores, 4 LLC slices), where a
@@ -751,7 +1376,7 @@ The mesh becomes clearly superior when the core count exceeds the crossbar's are
 nodes. Workloads with uniform random traffic (every core equally likely to communicate with every
 other core) stress the mesh's bisection bandwidth and may favor a higher-radix topology.
 
-### 26.6.3 Directory precision vs. area
+### 26.7.3 Directory precision vs. area
 
 The directory's storage cost is a direct function of its precision. For a system with N RN-F nodes
 and an LLC with C lines:
@@ -775,7 +1400,7 @@ the design has to choose a recovery policy: some implementations back-invalidate
 while others use a different resynchronization strategy. XiangShan sizes the filter to the
 aggregate L2 capacity, which makes overflow rare.
 
-### 26.6.4 Inclusive vs. non-inclusive LLC
+### 26.7.4 Inclusive vs. non-inclusive LLC
 
 | Design decision | Inclusive | Non-inclusive (NINE) |
 |---|---|---|
@@ -796,7 +1421,7 @@ duplicating them.
 
 ---
 
-## 26.7 Common Misconceptions
+## 26.8 Common Misconceptions
 
 **"Snooping is obsolete."** Snooping is alive and well inside small clusters. ARM's DynamIQ
 Shared Unit (DSU) uses snooping within a cluster, and CHI directory-based coherence can connect
@@ -826,7 +1451,7 @@ The actual bottleneck in many systems is memory bandwidth or memory latency, not
 
 ---
 
-## 26.8 Key Takeaways
+## 26.9 Key Takeaways
 
 1. **Directory-based coherence** replaces broadcast snooping with targeted messages. An HN-F
    (Home Node) maintains a directory tracking which RN-F (Request Node) caches hold each line.
@@ -848,9 +1473,15 @@ The actual bottleneck in many systems is memory bandwidth or memory latency, not
    ensuring that responses are always sinkable — receiving a response never requires sending
    another message on the same channel class.
 
+6. **Distributing the LLC** across multiple HN-F slices on a mesh scales both directory bandwidth
+   and data bandwidth linearly with slice count. Address hashing maps each cache line to exactly
+   one HN-F. **Direct Cache Transfer (DCT)** reduces read-with-snoop latency from 4-hop to 3-hop
+   by forwarding data directly from the owner cache to the requester, bypassing the home node on
+   the data path.
+
 ---
 
-## 26.9 Checkpoint Questions
+## 26.10 Checkpoint Questions
 
 **Basic:**
 
@@ -863,37 +1494,51 @@ The actual bottleneck in many systems is memory bandwidth or memory latency, not
 3. In CHI terminology, what is the difference between an RN-F, an HN-F, and an SN-F? Which
    XiangShan module implements each?
 
+4. In a distributed-directory mesh, how does a requesting RN-F determine which HN-F to send its
+   coherence request to? Why must every node in the system agree on this mapping?
+
 **Intermediate:**
 
-4. Explain the difference between the UC and SC cache states. Why would the HN-F grant UC
+5. Explain the difference between the UC and SC cache states. Why would the HN-F grant UC
    instead of SC to a `ReadNotSharedDirty` requester when no other caches hold the line?
 
-5. Why do coherence protocols need separate NoC virtual channels (or virtual networks) for
+6. Why do coherence protocols need separate NoC virtual channels (or virtual networks) for
    request, snoop, response, and data traffic? Construct a specific 3-node deadlock scenario
    that arises when all message types share a single channel.
 
-6. In a non-inclusive (NINE) LLC, what happens when the snoop filter must evict an entry for
+7. In a non-inclusive (NINE) LLC, what happens when the snoop filter must evict an entry for
    line Y that is still cached in an RN-F's L2? Compare with the inclusive case.
+
+8. On the 4×2 mesh described in Section 26.6, compute the total critical-path latency (in hops)
+   for a read miss where the requester is at Node 7, the home HN-F is at Node 2, and the data
+   owner is at Node 4. Compare the 4-hop flow and the 3-hop DCT flow. Which saves more cycles,
+   and why?
 
 **Advanced:**
 
-7. A 16-core chip uses a full bit-vector directory. Each directory entry needs one presence bit
+9. A 16-core chip uses a full bit-vector directory. Each directory entry needs one presence bit
    per core plus 3 state bits. Calculate the directory storage overhead as a percentage of LLC
    capacity for 64-byte lines and a 16 MB LLC. Then recalculate for a snoop filter sized to
    cover 8 MB of aggregate L2 capacity. What is the area reduction?
 
-8. Compare ring and 2D mesh topologies for a 16-node design (4 RN-F + 1 HN-F per ring; 4×4
-   mesh). Calculate worst-case hop count and bisection bandwidth for each. Under what workload
-   characteristics does the mesh become clearly superior?
+10. Compare ring and 2D mesh topologies for a 16-node design (4 RN-F + 1 HN-F per ring; 4×4
+    mesh). Calculate worst-case hop count and bisection bandwidth for each. Under what workload
+    characteristics does the mesh become clearly superior?
 
-9. Design a hybrid coherence scheme where a 4-core cluster uses snooping internally and
-   directory-based CHI coherence across clusters. What are the boundary conditions at the cluster
-   interface? Specifically: when a cross-cluster snoop arrives at a cluster, how does the cluster
-   determine which internal cache holds the line without broadcasting?
+11. Design a hybrid coherence scheme where a 4-core cluster uses snooping internally and
+    directory-based CHI coherence across clusters. What are the boundary conditions at the cluster
+    interface? Specifically: when a cross-cluster snoop arrives at a cluster, how does the cluster
+    determine which internal cache holds the line without broadcasting?
+
+12. A 4×4 mesh has 16 nodes, each with one RN-F and one HN-F slice. Assuming uniformly random
+    address distribution across HN-F slices, compute the average round-trip hop count for a
+    read miss to an uncached line (no snoop needed). Compare this to a design with a single
+    centralized HN-F at position (2,2). Under what workload conditions does the centralized
+    design actually have lower average latency despite its throughput limitations?
 
 ---
 
-## 26.10 Further Reading
+## 26.11 Further Reading
 
 1. Sorin, Hill, and Wood, *A Primer on Memory Consistency and Cache Coherence* (2nd ed., 2020)
    — the definitive graduate reference on coherence protocols and their correctness properties.
