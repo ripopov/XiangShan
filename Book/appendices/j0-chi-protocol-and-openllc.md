@@ -30,16 +30,16 @@ organized as three self-contained documents that build on each other progressive
 
 ## J. Motivation
 
-Chapter 28 of the main text introduces coherence protocols at the architectural level, and
-Appendix I covers TileLink in depth. When `EnableCHI` is set, XiangShan replaces the
-TileLink-based HuanCun L3 with OpenLLC, a CHI-native last-level cache. This appendix
-series provides the protocol background (J.1), the concrete XiangShan implementation (J.2),
-and forward-looking architectural context for full CHI NoC designs (J.3).
+Part V of the main text (Chapters 26–30) covers directory-based coherence, AMBA CHI, and
+each CHI node in XiangShan. Appendix I covers TileLink in depth. When `EnableCHI` is set,
+XiangShan replaces the TileLink-based HuanCun L3 with OpenLLC, a CHI-native last-level
+cache. This appendix series provides supplementary protocol detail (J.1), implementation
+deep-dives (J.2), and forward-looking architectural context for full CHI NoC designs (J.3).
 
 ---
 
 ## J. Prerequisites
 
 - Appendix I.1 (Cache Coherence Fundamentals) — MESI/MOESI state machines
-- Chapter 26 (L2 Cache / CoupledL2) — understanding of the L2 as a CHI Request Node
-- Chapter 28 (Coherence Protocol) — architectural overview of TileLink vs. CHI
+- Chapter 27 (AMBA CHI in XiangShan) — protocol overview, node types, channels
+- Chapter 28 (CoupledL2 — RN-F) — understanding of the L2 as a CHI Request Node

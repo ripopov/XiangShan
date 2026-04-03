@@ -90,5 +90,5 @@
     - OpenLLC source: `openLLC/src/main/scala/openLLC/`
     - OpenNCB source: `openLLC/openNCB/src/main/scala/openncb/`
     - Appendix J.1 (CHI Protocol Fundamentals)
-    - Chapter 26 (L2 Cache / CoupledL2)
-    - Chapter 27 (L3 Cache / HuanCun / OpenLLC)
+    - Chapter 28 (CoupledL2 — RN-F)
+    - Chapter 29 (OpenLLC — HN-F)

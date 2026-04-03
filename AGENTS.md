@@ -310,19 +310,21 @@ Each chapter should include:
 24. Hardware Prefetching
 25. MMU
 
-### Part V - Cache Hierarchy and Interconnect
-26. L2 Cache (CoupledL2)
-27. L3 Cache / LLC (HuanCun / OpenLLC)
-28. Coherence Protocol (TileLink + CHI)
+### Part V - Cache Hierarchy and Interconnect (CHIConfig)
+26. Directory-Based Coherence and Networks-on-Chip
+27. AMBA CHI in XiangShan
+28. CoupledL2 — The CHI Request Node (RN-F)
+29. OpenLLC — The CHI Home Node (HN-F)
+30. OpenNCB — The CHI Slave Node and Memory Bridge (SN-F)
 
 ### Part VI - Privileged Architecture and Debug
-29. Privilege Modes and Trap Handling
-30. Performance Counters and Events
-31. Debug and Trace
+31. Privilege Modes and Trap Handling
+32. Performance Counters and Events
+33. Debug and Trace
 
 ### Part VII - Physical Design Considerations
-32. Clock, Reset, and Power Management
-33. Design for Testability
+34. Clock, Reset, and Power Management
+35. Design for Testability
 
 ### Appendices
 A. Full `XSCoreParameters` table

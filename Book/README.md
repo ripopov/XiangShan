@@ -46,22 +46,24 @@ This book is organized in Markdown and follows the full chapter plan in `AGENTS.
 24. [Hardware Prefetching](part-04-memory-subsystem/24-hardware-prefetching.md) `EMPTY`
 25. [Memory Management Unit (MMU)](part-04-memory-subsystem/25-memory-management-unit.md) `EMPTY`
 
-### Part V — Cache Hierarchy and Interconnect
+### Part V — Cache Hierarchy and Interconnect (CHIConfig)
 
-26. [L2 Cache (CoupledL2)](part-05-cache-hierarchy-and-interconnect/26-l2-cache-coupledl2.md) `EMPTY`
-27. [L3 Cache / LLC (HuanCun / OpenLLC)](part-05-cache-hierarchy-and-interconnect/27-l3-cache-llc.md) `EMPTY`
-28. [Coherence Protocol](part-05-cache-hierarchy-and-interconnect/28-coherence-protocol.md) `EMPTY`
+26. [Directory-Based Coherence and Networks-on-Chip](part-05-cache-hierarchy-and-interconnect/26-directory-based-coherence-and-nocs.md) `PLAN`
+27. [AMBA CHI in XiangShan](part-05-cache-hierarchy-and-interconnect/27-amba-chi-in-xiangshan.md) `PLAN`
+28. [CoupledL2 — The CHI Request Node (RN-F)](part-05-cache-hierarchy-and-interconnect/28-coupledl2-chi-request-node.md) `PLAN`
+29. [OpenLLC — The CHI Home Node (HN-F)](part-05-cache-hierarchy-and-interconnect/29-openllc-chi-home-node.md) `PLAN`
+30. [OpenNCB — The CHI Slave Node and Memory Bridge (SN-F)](part-05-cache-hierarchy-and-interconnect/30-openncb-chi-slave-node.md) `PLAN`
 
 ### Part VI — Privileged Architecture and Debug
 
-29. [Privilege Modes and Trap Handling](part-06-privileged-architecture-and-debug/29-privilege-modes-and-trap-handling.md) `EMPTY`
-30. [Performance Counters and Events](part-06-privileged-architecture-and-debug/30-performance-counters-and-events.md) `EMPTY`
-31. [Debug and Trace](part-06-privileged-architecture-and-debug/31-debug-and-trace.md) `EMPTY`
+31. [Privilege Modes and Trap Handling](part-06-privileged-architecture-and-debug/31-privilege-modes-and-trap-handling.md) `EMPTY`
+32. [Performance Counters and Events](part-06-privileged-architecture-and-debug/32-performance-counters-and-events.md) `EMPTY`
+33. [Debug and Trace](part-06-privileged-architecture-and-debug/33-debug-and-trace.md) `EMPTY`
 
 ### Part VII — Physical Design Considerations
 
-32. [Clock, Reset, and Power Management](part-07-physical-design-considerations/32-clock-reset-and-power-management.md) `EMPTY`
-33. [Design for Testability](part-07-physical-design-considerations/33-design-for-testability.md) `EMPTY`
+34. [Clock, Reset, and Power Management](part-07-physical-design-considerations/34-clock-reset-and-power-management.md) `EMPTY`
+35. [Design for Testability](part-07-physical-design-considerations/35-design-for-testability.md) `EMPTY`
 
 ### Appendices
 
