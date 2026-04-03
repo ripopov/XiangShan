@@ -349,17 +349,17 @@ to read X. In OpenLLC this path uses `ReadNotSharedDirty`, not `ReadShared`.
      │                       │<── ReadNotSharedDirty(X) ─│
      │                       │    [REQ channel]          │
      │                       │                           │
-     │<── SnpNotSharedDirty(X) ─────────────────────────│
+     │<── SnpNotSharedDirty(X) ──│                       │
      │    [SNP channel]      │                           │
      │                       │                           │
-     │                       │<──── SnpRespData(X) ──────│
-     │                       │    [RSP/DAT channel]      │
+     │── SnpRespData(X) ────>│                           │
+     │   [DAT channel]       │                           │
      │                       │                           │
-     │<── CompData(X, SC) ───│                           │
-     │    [DAT channel]      │                           │
+     │                       │── CompData(X, SC) ───────>│
+     │                       │   [DAT channel]           │
      │                       │                           │
-     │──── CompAck ─────────>│                           │
-     │    [RSP channel]      │                           │
+     │                       │<──── CompAck ─────────────│
+     │                       │     [RSP channel]         │
      │                       │                       │
 ```
 
@@ -394,8 +394,8 @@ wants to write to X and needs exclusive ownership.
      │── MakeUnique(X) ─────>│                       │
      │   [REQ channel]       │                       │
      │                       │                       │
-     │                       │── SnpUnique(X) ──────>│
-     │                       │   [SNP channel]       │
+     │                       │── SnpMakeInvalid(X) ──>│
+     │                       │   [SNP channel]        │
      │                       │                       │
      │                       │<── SnpResp(I) ────────│
      │                       │    [RSP channel]      │
@@ -638,31 +638,31 @@ practical directory protocol can function without this separation.
 To make the protocol tangible, we trace two consecutive transactions through a specific system.
 
 ```text
-                        ┌─────────┐
-                   ┌───>│  RN-F 0 │<───┐
-                   │    │ (Core 0)│    │
-                   │    └─────────┘    │
-                   │                   │
-              ┌────┴────┐         ┌────┴────┐
-              │  RN-F 3 │         │  RN-F 1 │
-              │(Core 3) │         │(Core 1) │
-              └────┬────┘         └────┬────┘
-                   │                   │
-                   │    ┌─────────┐    │
-                   └───>│  HN-F   │<───┘
-                        │(Home +  │
-                        │  LLC)   │
-                        └────┬────┘
-                             │
-                        ┌────┴────┐
-                        │  SN-F   │
-                        │(Memory) │
-                        └─────────┘
+              ┌─────────┐           ┌─────────┐
+         ┌───>│  RN-F 0 │<─────────>│  RN-F 1 │<───┐
+         │    │ (Core 0)│           │ (Core 1)│    │
+         │    └─────────┘           └─────────┘    │
+         │                                         │
+    ┌────┴────┐                               ┌────┴────┐
+    │  RN-F 3 │                               │  RN-F 2 │
+    │ (Core 3)│                               │ (Core 2)│
+    └────┬────┘                               └────┬────┘
+         │                                         │
+         │         ┌─────────┐                     │
+         └────────>│  HN-F   │<────────────────────┘
+                   │(Home +  │
+                   │  LLC)   │
+                   └────┬────┘
+                        │
+                   ┌────┴────┐
+                   │  SN-F   │
+                   │(Memory) │
+                   └─────────┘
 
-         Bidirectional ring. Each link: 1 hop.
-         RN-F 0 to HN-F: 2 hops (via RN-F 3 or RN-F 1).
-         RN-F 0 to RN-F 2: does not exist in this 4-core example;
-         the ring has 5 nodes total (4 RN-F + 1 HN-F).
+         Bidirectional ring with 6 nodes: 4 RN-F + HN-F + SN-F.
+         Each link: 1 hop.
+         RN-F 0 to HN-F: 2 hops (via RN-F 3 or via RN-F 1 → RN-F 2).
+         RN-F 2 to HN-F: 1 hop (direct link).
 ```
 
 Assumptions:
@@ -677,7 +677,7 @@ Assumptions:
 | Cycle | Event | Channel | Hops |
 |---|---|---|---|
 | 0 | RN-F 0 sends ReadNotSharedDirty(X) toward HN-F | REQ | — |
-| 2 | ReadNotSharedDirty(X) arrives at HN-F (2 hops via RN-F 1) | REQ | 2 |
+| 2 | ReadNotSharedDirty(X) arrives at HN-F (2 hops via RN-F 3) | REQ | 2 |
 | 3 | HN-F looks up directory: X is I. No snoops needed. | — | — |
 | 4 | HN-F returns CompData(X, UC) toward RN-F 0. | DAT | — |
 | 6 | CompData arrives at RN-F 0. | DAT | 2 |
@@ -695,17 +695,17 @@ Core 2 needs exclusive ownership for a store. X is currently UC at RN-F 0.
 | Cycle | Event | Channel | Hops |
 |---|---|---|---|
 | 10 | RN-F 2 sends ReadUnique(X) toward HN-F. | REQ | — |
-| 12 | ReadUnique(X) arrives at HN-F. | REQ | 2 |
-| 13 | HN-F looks up directory: X held by RN-F 0 in UC state. | — | — |
-| 13 | HN-F sends SnpUnique(X) to RN-F 0. | SNP | — |
-| 15 | RN-F 0 returns the data and a snoop response. | RSP/DAT | 2 |
-| 17 | HN-F sends CompData(X, UC) to RN-F 2. | DAT | — |
-| 19 | CompData arrives at RN-F 2. | DAT | 2 |
-| 20 | RN-F 2 sends CompAck to HN-F. | RSP | — |
-| 22 | CompAck arrives at HN-F. MSHR deallocated. | RSP | 2 |
+| 11 | ReadUnique(X) arrives at HN-F (1 hop). | REQ | 1 |
+| 12 | HN-F looks up directory: X held by RN-F 0 in UC state. | — | — |
+| 12 | HN-F sends SnpUnique(X) to RN-F 0. | SNP | — |
+| 14 | SnpUnique(X) arrives at RN-F 0 (2 hops via RN-F 3). RN-F 0 sends SnpRespData toward HN-F. | SNP/DAT | 2 |
+| 16 | SnpRespData arrives at HN-F (2 hops). HN-F sends CompData(X, UC) to RN-F 2. | DAT | 2 |
+| 17 | CompData arrives at RN-F 2 (1 hop). | DAT | 1 |
+| 18 | RN-F 2 sends CompAck to HN-F. | RSP | — |
+| 19 | CompAck arrives at HN-F. MSHR deallocated. | RSP | 1 |
 
-**Total latency:** 9 cycles from request to data arrival (cycle 10 to 19). **Total messages:** 5
-(ReadUnique, SnpUnique, snoop response, CompData, CompAck).
+**Total latency:** 7 cycles from request to data arrival (cycle 10 to 17). **Total messages:** 5
+(ReadUnique, SnpUnique, SnpRespData, CompData, CompAck).
 
 **Directory state:** X → {RN-F 2, UC}. The store will mark the line dirty after the coherence
 transaction completes.
