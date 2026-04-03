@@ -127,9 +127,8 @@ Bus-based snooping at 4 cores:          Bus-based snooping at 16 cores:
 
 At 8–16 cores, snooping hits a bandwidth wall. Each miss forces the bus to carry N snoop requests
 and N snoop responses, but most of those snoops return "I don't have that line" — wasted bandwidth
-and wasted energy. Measurements on real workloads show that over 95% of snoops at 16 cores are
-negative (the snooped cache does not hold the line). The bus becomes the bottleneck long before the
-caches or the cores saturate.
+and wasted energy. In many workloads, negative snoops dominate once core count reaches the teens.
+The bus becomes the bottleneck long before the caches or the cores saturate.
 
 ### 26.1.3 The directory idea: track who has what
 
@@ -150,9 +149,9 @@ In CHI terminology:
 | Memory endpoint | **Slave Node (SN-F)** | Serves data when HN-F does not have it |
 
 The bandwidth per miss is now O(1): one request to the HN-F, a small number of snoops to actual
-sharers (often zero or one), and a data response back. The total system bandwidth grows linearly
-with core count, not quadratically. This is why every modern multi-core processor with more than
-four cores uses some form of directory-based coherence.
+sharers (often zero or one), and a data response back. The total system bandwidth grows far more
+slowly than broadcast snooping, which is why directory-based or hierarchical coherence becomes the
+practical choice once a shared bus no longer scales.
 
 ---
 
@@ -177,9 +176,9 @@ precision for area: fewer bits per entry, but more unnecessary snoops.
 
 **Limited-pointer directory.** Track at most K sharers explicitly (e.g., K=2 or K=4). If more than K
 caches share a line, the directory falls back to broadcast. This works well when most lines have
-few sharers — which is the common case. Studies show that over 90% of shared lines have two or
-fewer sharers. The rare lines with many sharers (e.g., lock variables) trigger broadcast, but
-their frequency is low enough that overall bandwidth remains manageable.
+few sharers, which is the common case in shared-memory workloads. The rare lines with many sharers
+(e.g., lock variables) trigger broadcast, but their frequency is low enough that overall bandwidth
+remains manageable.
 
 **Snoop filter.** An inverse directory that tracks only lines that are currently cached by some
 RN-F, rather than tracking the state of every line in memory. This is the approach used by
@@ -244,14 +243,15 @@ coherent request, it ensures that the response reflects the globally latest valu
 its own data store, from a snooped cache, or from memory via the SN-F.
 
 **Point-of-Serialization (PoS)** is the location where all requests to the same address are
-ordered into a single sequence. Two concurrent requests to the same line — say, a ReadUnique from
-RN-F 0 and a ReadShared from RN-F 1 — must be processed one at a time. The PoS determines which
-goes first.
+ordered into a single sequence. Two concurrent requests to the same line - say, a `ReadUnique` from
+RN-F 0 and a `ReadNotSharedDirty` from RN-F 1 - must be processed one at a time. The PoS
+determines which goes first.
 
-In CHI, the HN-F is typically both the PoC and the PoS. This is the case in XiangShan: the
-OpenLLC serializes all requests to a given address through a single MSHR (miss-status holding
-register) per address, guaranteeing that concurrent requests to the same line are processed in
-a well-defined order.
+In CHI, the HN-F is typically both the PoC and the PoS. That is the right mental model for
+XiangShan as well, but OpenLLC does not implement it with one MSHR per address. It uses pooled
+MSHRs and directory/set conflict blocking to serialize conflicting requests while they are in
+flight [LLCParam.scala:37](../../openLLC/src/main/scala/openLLC/LLCParam.scala#L37)
+[RequestArb.scala:100](../../openLLC/src/main/scala/openLLC/RequestArb.scala#L100).
 
 These concepts matter for understanding why certain message orderings are safe and others are not.
 When we trace coherence transactions in Section 26.3, the PoC and PoS are the invariants that
@@ -306,14 +306,8 @@ X is not cached by any RN-F (also state I).
 ```text
    RN-F 0              HN-F (directory)           SN-F (memory)
      │                       │                          │
-     │──── ReadShared(X) ───>│                          │
+     │── ReadNotSharedDirty(X) ─>│                       │
      │     [REQ channel]     │                          │
-     │                       │── ReadNoSnp(X) ─────────>│
-     │                       │   [REQ channel]          │
-     │                       │                          │
-     │                       │<──── CompData(X, data) ──│
-     │                       │      [DAT channel]       │
-     │                       │                          │
      │<── CompData(X, UC) ───│                          │
      │    [DAT channel]      │                          │
      │                       │                          │
@@ -322,14 +316,15 @@ X is not cached by any RN-F (also state I).
      │                       │                          │
 ```
 
-**Step 1.** RN-F 0 sends a `ReadShared` request on the REQ channel. This says: "I need a copy of
-line X; shared access is sufficient."
+**Step 1.** RN-F 0 sends a `ReadNotSharedDirty` request on the REQ channel. In XiangShan's OpenLLC,
+this is the normal read opcode [RequestArb.scala:65](../../openLLC/src/main/scala/openLLC/RequestArb.scala#L65).
 
 **Step 2.** The HN-F looks up X in its directory. No RN-F holds a copy, so no snoops are needed.
-The HN-F checks its own data store. If it has the data (a previous writeback left it there), it
-responds directly. If not, it sends `ReadNoSnp` to the SN-F to fetch from memory.
+If the HN-F already has the line in its LLC, it responds directly. If not, it would fetch the line
+from the SN-F with `ReadNoSnp` and then continue the same completion path.
 
-**Step 3.** The SN-F returns the data via `CompData` on the DAT channel.
+**Step 3.** The data returns via `CompData` on the DAT channel, either from the HN-F's LLC hit
+path or from the SN-F if the HN-F had to fetch it.
 
 **Step 4.** The HN-F forwards the data to RN-F 0 as `CompData` with state UC (Unique Clean).
 The state is UC, not SC, because RN-F 0 is the only requester — giving it unique ownership avoids
@@ -340,60 +335,53 @@ is complete and the HN-F can release the tracking entry (MSHR) for address X.
 
 **Directory state after:** X → {RN-F 0, state UC}.
 
-**Message count:** 4 messages total (ReadShared, ReadNoSnp, two CompData, CompAck) — 5 if counting
-the SN-F response separately. Compare with snooping, which would broadcast the miss to all N
-caches regardless.
+**Message count:** 3 messages in the LLC-hit case. If the HN-F has to fetch the line from SN-F,
+add one request/response round trip.
 
-### 26.3.2 Read miss to an exclusively-owned line (snoop required)
+### 26.3.2 Read miss to a line held by another core
 
-**Scenario:** Core 0 holds X in state UD (Unique Dirty — it has written to X). Core 1 now wants
-to read X.
+**Scenario:** Core 0 holds X in state UD (Unique Dirty - it has written to X). Core 1 now wants
+to read X. In OpenLLC this path uses `ReadNotSharedDirty`, not `ReadShared`.
 
 ```text
    RN-F 0              HN-F (directory)           RN-F 1
      │                       │                       │
-     │                       │<── ReadShared(X) ─────│
-     │                       │    [REQ channel]      │
-     │                       │                       │
-     │<── SnpSharedFwd(X) ───│                       │
-     │    [SNP channel]      │                       │
-     │                       │                       │
-     │──────────── CompData(X, data, SC) ───────────>│
-     │             [DAT channel, direct to RN-F 1]   │
-     │                       │                       │
-     │── SnpResp(SC) ───────>│                       │
-     │   [RSP channel]       │                       │
-     │                       │                       │
-     │                       │──── Comp(SC) ────────>│
-     │                       │    [RSP channel]      │
-     │                       │                       │
-     │                       │<──── CompAck ─────────│
-     │                       │     [RSP channel]     │
+     │                       │<── ReadNotSharedDirty(X) ─│
+     │                       │    [REQ channel]          │
+     │                       │                           │
+     │<── SnpNotSharedDirty(X) ─────────────────────────│
+     │    [SNP channel]      │                           │
+     │                       │                           │
+     │                       │<──── SnpRespData(X) ──────│
+     │                       │    [RSP/DAT channel]      │
+     │                       │                           │
+     │<── CompData(X, SC) ───│                           │
+     │    [DAT channel]      │                           │
+     │                       │                           │
+     │──── CompAck ─────────>│                           │
+     │    [RSP channel]      │                           │
      │                       │                       │
 ```
 
-**Step 1.** RN-F 1 sends `ReadShared(X)` to the HN-F.
+**Step 1.** RN-F 1 sends `ReadNotSharedDirty(X)` to the HN-F. That is the normal read opcode in
+OpenLLC [RequestArb.scala:65](../../openLLC/src/main/scala/openLLC/RequestArb.scala#L65).
 
 **Step 2.** The HN-F looks up X: state UD, held by RN-F 0. Since RN-F 0 has the only valid copy
-(and it is dirty), the HN-F must snoop it. It sends `SnpSharedFwd(X)` on the SNP channel. The
-"Fwd" suffix is a CHI optimization: it tells RN-F 0 to forward the data directly to RN-F 1
-rather than sending it back through the HN-F. This saves one hop and reduces HN-F bandwidth
-consumption.
+(and it is dirty), the HN-F must snoop it. OpenLLC sends `SnpNotSharedDirty(X)` here and uses the
+`retToSrc` flag to indicate where the snoop response should be returned
+[MainPipe.scala:332](../../openLLC/src/main/scala/openLLC/MainPipe.scala#L332)
+[MainPipe.scala:337](../../openLLC/src/main/scala/openLLC/MainPipe.scala#L337).
 
-**Step 3.** RN-F 0 receives the snoop. It downgrades from UD to SD (Shared Dirty — it still
-holds a copy and remains responsible for eventual writeback). It sends the data directly to
-RN-F 1 via `CompData` on the DAT channel, with the granted state SC (Shared Clean).
+**Step 3.** RN-F 0 returns the data in `SnpRespData`. If the response carries PassDirty, the HN-F
+records that internally. The requester still receives a shared completion, not unique ownership.
 
-**Step 4.** RN-F 0 also sends `SnpResp(SC)` to the HN-F, informing it of the new local state.
+**Step 4.** The HN-F forwards `CompData` to RN-F 1 with state SC, because the requester is getting
+a shared copy rather than ownership.
 
-**Step 5.** The HN-F sends `Comp(SC)` to RN-F 1, confirming the transaction. RN-F 1 replies
-with `CompAck`.
+**Step 5.** RN-F 1 replies with `CompAck`, and the HN-F retires the transaction.
 
-**Directory state after:** X → {RN-F 0 (SD), RN-F 1 (SC)}.
-
-This is the **three-party transaction** pattern that dominates multi-core coherence: requester
-→ home → snooped owner → (data to requester, response to home) → completion. The HN-F
-orchestrates the exchange but avoids being in the data path when forwarding is possible.
+**Directory state after:** X is present in both caches. If PassDirty was set, the HN-F also keeps
+track of the dirty responsibility internally.
 
 ### 26.3.3 Write miss: upgrade from Shared to Unique
 
@@ -423,8 +411,9 @@ wants to write to X and needs exclusive ownership.
 **Step 1.** RN-F 0 sends `MakeUnique(X)`. This is a *dataless* transaction: RN-F 0 already has
 the data (in SC state), so it only needs permission to write, not a data transfer.
 
-**Step 2.** The HN-F sees that RN-F 1 also holds X in SC. It sends `SnpUnique(X)` to RN-F 1,
-demanding invalidation.
+**Step 2.** The HN-F sees that RN-F 1 also holds X in SC. It sends `SnpMakeInvalid(X)` to RN-F 1,
+demanding invalidation. OpenLLC maps `MakeUnique` to `SnpMakeInvalid` on this path
+[MainPipe.scala:331](../../openLLC/src/main/scala/openLLC/MainPipe.scala#L331).
 
 **Step 3.** RN-F 1 invalidates its copy and responds with `SnpResp(I)`.
 
@@ -435,11 +424,10 @@ actually writes). The HN-F updates its directory: X → {RN-F 0, state UC}.
 
 This transaction is the **expensive case** for directories: the fan-out of invalidation snoops
 scales with the number of sharers. If eight RN-F nodes share a line, the HN-F must send eight
-`SnpUnique` messages and wait for eight `SnpResp` completions before granting ownership. For
+invalidation snoops and wait for eight `SnpResp` completions before granting ownership. For
 heavily shared lines (locks, barriers), this becomes a serialization bottleneck. The
 limited-pointer directory handles this by falling back to broadcast when the sharer count
-exceeds K; the snoop filter handles it by having storage proportional to the aggregate L2 size,
-naturally limiting the maximum sharer count to the number of RN-F nodes.
+exceeds K; the snoop filter keeps storage proportional to the aggregate L2 size.
 
 ### 26.3.4 Eviction and writeback
 
@@ -609,7 +597,7 @@ to support a real NoC topology for scaled-out configurations.
 
 ### 26.4.5 Mapping coherence to NoC channels
 
-Coherence traffic is not homogeneous. A `ReadShared` request, a `SnpUnique` snoop, a data
+Coherence traffic is not homogeneous. A `ReadNotSharedDirty` request, a `SnpUnique` snoop, a data
 response, and a `CompAck` acknowledgment are fundamentally different message types with different
 flow-control requirements. If they all share a single NoC channel, a subtle and dangerous problem
 arises: **protocol-level deadlock**.
@@ -624,8 +612,8 @@ each with its own buffer resources. CHI defines four channel types that must not
 
 | CHI channel | Direction | Content | Deadlock role |
 |---|---|---|---|
-| **REQ** | RN-F → HN-F | Coherent requests (ReadShared, MakeUnique, WriteBackFull, ...) | Can generate snoops and responses |
-| **SNP** | HN-F → RN-F | Snoop commands (SnpShared, SnpUnique, SnpSharedFwd, ...) | Generated by requests; generates snoop responses |
+| **REQ** | RN-F → HN-F | Coherent requests (ReadNotSharedDirty, ReadUnique, MakeUnique, WriteBackFull, ...) | Can generate snoops and responses |
+| **SNP** | HN-F → RN-F | Snoop commands (SnpNotSharedDirty, SnpUnique, SnpMakeInvalid, ...) | Generated by requests; generates snoop responses |
 | **RSP** | Bidirectional | Completions and acknowledgments (Comp, CompAck, SnpResp, ...) | Consumed without generating further messages |
 | **DAT** | Bidirectional | Data payloads with coherence metadata (CompData, CBWrData, ...) | Consumed without generating further messages |
 
@@ -682,17 +670,16 @@ Assumptions:
 - Each link traversal takes 1 cycle. Router pipeline adds 1 cycle per hop.
 - Cache line X starts in state I everywhere (no cached copies).
 
-### 26.5.2 Trace: Core 0 reads X, then Core 2 writes X
+### 26.5.2 Trace: Core 0 reads X, then Core 2 acquires exclusive ownership to write X
 
-**Transaction 1: Core 0 reads X (ReadShared)**
+**Transaction 1: Core 0 reads X (ReadNotSharedDirty)**
 
 | Cycle | Event | Channel | Hops |
 |---|---|---|---|
-| 0 | RN-F 0 sends ReadShared(X) toward HN-F | REQ | — |
-| 2 | ReadShared(X) arrives at HN-F (2 hops via RN-F 1) | REQ | 2 |
+| 0 | RN-F 0 sends ReadNotSharedDirty(X) toward HN-F | REQ | — |
+| 2 | ReadNotSharedDirty(X) arrives at HN-F (2 hops via RN-F 1) | REQ | 2 |
 | 3 | HN-F looks up directory: X is I. No snoops needed. | — | — |
-| 3 | HN-F has data in LLC (or fetches from SN-F; assume LLC hit). | — | — |
-| 4 | HN-F sends CompData(X, UC) toward RN-F 0. | DAT | — |
+| 4 | HN-F returns CompData(X, UC) toward RN-F 0. | DAT | — |
 | 6 | CompData arrives at RN-F 0. | DAT | 2 |
 | 7 | RN-F 0 sends CompAck toward HN-F. | RSP | — |
 | 9 | CompAck arrives at HN-F. HN-F deallocates MSHR. | RSP | 2 |
@@ -701,7 +688,7 @@ Assumptions:
 
 **Directory state:** X → {RN-F 0, UC}.
 
-**Transaction 2: Core 2 writes X (ReadUnique)**
+**Transaction 2: Core 2 acquires exclusive ownership for a write (ReadUnique)**
 
 Core 2 needs exclusive ownership for a store. X is currently UC at RN-F 0.
 
@@ -710,21 +697,18 @@ Core 2 needs exclusive ownership for a store. X is currently UC at RN-F 0.
 | 10 | RN-F 2 sends ReadUnique(X) toward HN-F. | REQ | — |
 | 12 | ReadUnique(X) arrives at HN-F. | REQ | 2 |
 | 13 | HN-F looks up directory: X held by RN-F 0 in UC state. | — | — |
-| 13 | HN-F sends SnpUniqueFwd(X, fwd=RN-F 2) to RN-F 0. | SNP | — |
-| 15 | SnpUniqueFwd arrives at RN-F 0. | SNP | 2 |
-| 16 | RN-F 0 invalidates X (UC → I), forwards data to RN-F 2. | DAT | — |
-| 16 | RN-F 0 sends SnpResp(I) to HN-F. | RSP | — |
-| 18 | CompData(X, UD) arrives at RN-F 2 (from RN-F 0, 2 hops). | DAT | 2 |
-| 18 | SnpResp(I) arrives at HN-F. | RSP | 2 |
-| 18 | HN-F sends Comp(UD) to RN-F 2. | RSP | — |
-| 20 | Comp arrives at RN-F 2. | RSP | 2 |
+| 13 | HN-F sends SnpUnique(X) to RN-F 0. | SNP | — |
+| 15 | RN-F 0 returns the data and a snoop response. | RSP/DAT | 2 |
+| 17 | HN-F sends CompData(X, UC) to RN-F 2. | DAT | — |
+| 19 | CompData arrives at RN-F 2. | DAT | 2 |
 | 20 | RN-F 2 sends CompAck to HN-F. | RSP | — |
 | 22 | CompAck arrives at HN-F. MSHR deallocated. | RSP | 2 |
 
-**Total latency:** 8 cycles from request to data arrival (cycle 10 to 18). **Total messages:** 6
-(ReadUnique, SnpUniqueFwd, CompData, SnpResp, Comp, CompAck).
+**Total latency:** 9 cycles from request to data arrival (cycle 10 to 19). **Total messages:** 5
+(ReadUnique, SnpUnique, snoop response, CompData, CompAck).
 
-**Directory state:** X → {RN-F 2, UD}.
+**Directory state:** X → {RN-F 2, UC}. The store will mark the line dirty after the coherence
+transaction completes.
 
 ### 26.5.3 Comparison: what would snooping cost?
 
@@ -811,10 +795,10 @@ For 16 cores, 64-byte lines, 16 MB LLC (C = 262,144 lines), and 3 state bits:
   = 1,245,184 bits ≈ **152 KB** (0.9% of LLC capacity)
 
 The snoop filter wins on area because it only allocates entries for lines that are actually cached
-in some private cache. The trade-off is that when the snoop filter itself is full and must evict
-an entry, it must send a back-invalidation to the private cache that holds that line — even if the
-private cache still needs it. This creates additional coherence traffic, but studies show that
-snoop filter evictions are rare when the filter is sized to cover the aggregate L2 capacity.
+in some private cache. The trade-off is that when a precise snoop filter must evict a tracked line,
+the design has to choose a recovery policy: some implementations back-invalidate the private copy,
+while others use a different resynchronization strategy. XiangShan sizes the filter to the
+aggregate L2 capacity, which makes overflow rare.
 
 ### 26.6.4 Inclusive vs. non-inclusive LLC
 
@@ -822,32 +806,34 @@ snoop filter evictions are rare when the filter is sized to cover the aggregate 
 |---|---|---|
 | **Effective cache capacity** | LLC only (private cache data duplicated) | LLC + private caches |
 | **Snoop filter needed?** | No (LLC *is* the snoop filter) | Yes (separate structure) |
-| **Back-invalidation** | On every LLC eviction | Only on snoop-filter eviction |
+| **Back-invalidation** | On every LLC eviction | Only when the filter must evict a tracked line |
 | **Coherence simplicity** | Higher (LLC always has data for snoops) | Lower (must track data location) |
 | **Best for** | Small private caches, large LLC | Large private caches, bandwidth-sensitive workloads |
 
 XiangShan's OpenLLC uses a **non-inclusive** design. The snoop filter in the HN-F tracks which
 RN-F nodes hold each line, but the LLC data array does not necessarily hold a copy of every
-privately-cached line. This is the right trade-off for XiangShan's design point: with 1 MB L2
-caches per core, an inclusive 4 MB LLC would waste significant capacity on duplicates. The
-non-inclusive design lets the LLC store additional unique lines, effectively adding its capacity
-to the private caches rather than duplicating them.
+privately-cached line. In the default CHI configuration, each core's L2 is 1 MB and the OpenLLC is
+4 MB total [Configs.scala:278](../../src/main/scala/top/Configs.scala#L278)
+[Configs.scala:619](../../src/main/scala/top/Configs.scala#L619). An inclusive LLC at that
+point would duplicate a meaningful amount of hot data. The non-inclusive design lets the LLC
+store additional unique lines, effectively adding its capacity to the private caches rather than
+duplicating them.
 
 ---
 
 ## 26.7 Common Misconceptions
 
 **"Snooping is obsolete."** Snooping is alive and well inside small clusters. ARM's DynamIQ
-Shared Unit (DSU) uses snooping for up to 12 CPUs within a cluster, and CHI directory-based
-coherence between clusters. The key insight is that snooping and directories coexist at different
-hierarchy levels, chosen by the bandwidth and latency trade-offs at each level.
+Shared Unit (DSU) uses snooping within a cluster, and CHI directory-based coherence can connect
+clusters. The key insight is that snooping and directories coexist at different hierarchy levels,
+chosen by the bandwidth and latency trade-offs at each level.
 
 **"A directory eliminates all broadcasts."** Practical directories are not perfectly precise.
 Limited-pointer directories fall back to broadcast when the sharer count exceeds K. Snoop filters
-must evict entries when full, triggering back-invalidations. Even a full bit-vector directory
-cannot avoid broadcasting when the directory entry itself says "all N caches share this line."
-The directory's benefit is that broadcasts become rare (< 1% of transactions in typical workloads),
-not that they are eliminated entirely.
+may need to evict tracked entries when full, which can trigger additional coherence traffic in
+designs that rely on precise presence tracking. Even a full bit-vector directory cannot avoid
+broadcasting when the directory entry itself says "all N caches share this line." The directory's
+benefit is that broadcasts become uncommon, not that they are eliminated entirely.
 
 **"More cache levels always help."** Adding a cache level (e.g., an L3 between L2 and memory)
 adds latency on every miss that passes through it. If the working set fits in L2, the L3 is
@@ -905,7 +891,7 @@ The actual bottleneck in many systems is memory bandwidth or memory latency, not
 **Intermediate:**
 
 4. Explain the difference between the UC and SC cache states. Why would the HN-F grant UC
-   instead of SC to a ReadShared requester when no other caches hold the line?
+   instead of SC to a `ReadNotSharedDirty` requester when no other caches hold the line?
 
 5. Why do coherence protocols need separate NoC virtual channels (or virtual networks) for
    request, snoop, response, and data traffic? Construct a specific 3-node deadlock scenario
